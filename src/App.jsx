@@ -1083,6 +1083,41 @@ function App() {
     };
   }, [rankings, targetClanData, snapshots]);
 
+  // Helper to generate consistent, deterministic simulation behavior profiles per reset boundary (3-hour blocks)
+  const getClanSimProfile = (clanId, timestampStr) => {
+    // Round timestamp to 3-hour blocks
+    const date = new Date(timestampStr.replace(' ', 'T'));
+    const blockHours = Math.floor(date.getHours() / 3) * 3;
+    const resetKey = `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()} ${blockHours}:00`;
+
+    // Simple deterministic hash
+    const seedStr = `${clanId}-${resetKey}`;
+    let hash = 0;
+    for (let i = 0; i < seedStr.length; i++) {
+      hash = (hash << 5) - hash + seedStr.charCodeAt(i);
+      hash |= 0;
+    }
+    const rand = Math.abs(hash % 1000) / 1000;
+
+    // Profiles:
+    // - 0.00 to 0.02: Rare penalty / deduction (loss of rep)
+    // - 0.02 to 0.15: Bleeding / Stagnant (0 gain)
+    // - 0.15 to 0.45: Active standard (gains rep)
+    // - 0.45 to 0.60: Hyper active (gains high rep)
+    // - 0.60 to 1.00: Inactive / Stale (0 gain)
+    if (rand < 0.02) {
+      return { type: 'deduction', baseGain: -180, variance: 50 };
+    } else if (rand < 0.15) {
+      return { type: 'stagnant', baseGain: 0, variance: 0 };
+    } else if (rand < 0.45) {
+      return { type: 'active', baseGain: 120, variance: 60 };
+    } else if (rand < 0.60) {
+      return { type: 'hyper', baseGain: 350, variance: 120 };
+    } else {
+      return { type: 'inactive', baseGain: 0, variance: 0 };
+    }
+  };
+
   // Generate simulated next tick
   const simulateLiveTick = () => {
     if (!rankings) return;
@@ -1101,6 +1136,24 @@ function App() {
       const isAhead = competitiveData.clanAhead && clan.id === competitiveData.clanAhead.id;
       const isBehind = competitiveData.clanBehind && clan.id === competitiveData.clanBehind.id;
 
+      // Retrieve consistent profile for this reset block
+      const profile = getClanSimProfile(clan.id, newTimestamp);
+
+      let baseGain = profile.baseGain;
+      let variance = profile.variance;
+
+      // Custom adjustments to keep target/competitors active and competitive
+      if (isTarget) {
+        baseGain = 160;
+        variance = 80;
+      } else if (isAhead) {
+        baseGain = Math.max(baseGain, 150);
+        variance = Math.max(variance, 70);
+      } else if (isBehind) {
+        baseGain = Math.max(baseGain, 220);
+        variance = Math.max(variance, 100);
+      }
+
       let memberList = clan.member_list ? [...clan.member_list] : [];
       let clanGainSum = 0;
 
@@ -1108,27 +1161,22 @@ function App() {
         memberList = memberList.map(m => {
           let gain = 0;
           
-          if (isTarget) {
-            if (m.reputation === 0 || m.name.includes('OldShadow')) {
-              gain = 0;
-            } else {
-              const roll = Math.random();
-              if (roll > 0.5) gain = 0;
-              else gain = Math.floor(Math.random() * 250) + 50;
+          if (m.reputation > 0 && !m.name.includes('OldShadow')) {
+            if (baseGain > 0) {
+              const memberRoll = Math.random();
+              if (memberRoll > 0.4) {
+                gain = Math.floor(Math.random() * variance) + Math.floor(baseGain / 10);
+              }
+            } else if (baseGain < 0) {
+              gain = Math.floor(baseGain / 10);
             }
-          } else if (isAhead) {
-            gain = Math.random() > 0.3 ? Math.floor(Math.random() * 400) + 50 : 0;
-          } else if (isBehind) {
-            gain = Math.random() > 0.15 ? Math.floor(Math.random() * 650) + 150 : 0;
-          } else {
-            gain = Math.random() > 0.5 ? Math.floor(Math.random() * 300) : 0;
           }
 
           clanGainSum += gain;
 
           return {
             ...m,
-            reputation: m.reputation + gain
+            reputation: Math.max(0, m.reputation + gain)
           };
         });
 
@@ -1150,18 +1198,19 @@ function App() {
         const membersCount = clan.members || 40;
         for (let i = 0; i < membersCount; i++) {
           let gain = 0;
-          if (isAhead) {
-            gain = Math.random() > 0.3 ? Math.floor(Math.random() * 400) + 50 : 0;
-          } else if (isBehind) {
-            gain = Math.random() > 0.15 ? Math.floor(Math.random() * 650) + 150 : 0;
-          } else {
-            gain = Math.random() > 0.5 ? Math.floor(Math.random() * 300) : 0;
+          if (baseGain > 0) {
+            const memberRoll = Math.random();
+            if (memberRoll > 0.4) {
+              gain = Math.floor(Math.random() * variance) + Math.floor(baseGain / 10);
+            }
+          } else if (baseGain < 0) {
+            gain = Math.floor(baseGain / 10);
           }
           clanGainSum += gain;
         }
       }
 
-      const totalRep = clan.reputation + clanGainSum;
+      const totalRep = Math.max(0, clan.reputation + clanGainSum);
 
       return {
         ...clan,
