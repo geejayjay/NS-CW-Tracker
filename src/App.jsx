@@ -855,59 +855,40 @@ function App() {
     return leaderboardAnalysis.filter(c => c.isActivelyGaining && c.gain > 0);
   }, [leaderboardAnalysis]);
 
-  // Identify possible bleed targets:
-  // A clan is bleeding if:
-  // 1. Its rep is stagnant or dropping (gain <= 0 or tickGain <= 0 while neighbors gain)
-  // 2. Nearby clans (within ±10 ranks) are actively gaining
-  // This means someone near them is farming and they are the likely victim
+  // ── Yield Bracket Configuration ──
+  // Maps per-win reputation gain → the target clan's rep range relative to the attacker.
+  // When attacking a bleeding clan, you earn rep based on how their total rep compares to yours.
+  // By reverse-engineering the yield from the attacker's gain, we can infer which rep range
+  // the target falls in, and thus identify the actual victim clan.
+  //
+  // Format: { yield, minPercent, maxPercent, label }
+  //   - yield: rep gained per battle win
+  //   - minPercent/maxPercent: target clan rep is this % relative to attacker's clan rep
+  //     e.g. minPercent=10, maxPercent=25 means target rep is 10%-25% HIGHER than attacker
+  const YIELD_BRACKETS = [
+    { yield: 15, minPercent: 25,  maxPercent: Infinity, label: '+15 (>25% higher)' },
+    { yield: 10, minPercent: 10,  maxPercent: 25,       label: '+10 (10-25% higher)' },
+    { yield: 6,  minPercent: 0,   maxPercent: 10,       label: '+6 (0-10% higher)' },
+    { yield: 3,  minPercent: -10, maxPercent: 0,        label: '+3 (0-10% lower)' },
+    { yield: 1,  minPercent: -Infinity, maxPercent: -10, label: '+1 (>10% lower)' },
+  ];
+
+  // Identify possible bleed targets using yield-bracket inference.
+  //
+  // Algorithm:
+  //   1. For each actively gaining clan, estimate the per-member yield bracket
+  //      by analyzing the total clan gain and active member count.
+  //   2. From the inferred bracket, compute the actual rep range of the target.
+  //   3. Find non-gaining clans whose rep falls within that range.
+  //   4. Score those clans — lowest velocity in the inferred range = highest score.
+  //   5. Cross-context suppression: if one clan is clearly the victim, reduce others.
   const bleedAnalysis = useMemo(() => {
     if (!targetClanData) return [];
 
     const myClanRep = targetClanData.current.reputation;
 
-    if (activelyGainingClans.length === 0) {
-      return leaderboardAnalysis.map(clan => {
-        let nextLowerThreshold = null;
-        let nextLowerYield = null;
-        if (clan.diffPercent > 25) {
-          nextLowerThreshold = 25;
-          nextLowerYield = 10;
-        } else if (clan.diffPercent > 10) {
-          nextLowerThreshold = 10;
-          nextLowerYield = 6;
-        } else if (clan.diffPercent >= 0) {
-          nextLowerThreshold = 0;
-          nextLowerYield = 3;
-        } else if (clan.diffPercent >= -10) {
-          nextLowerThreshold = -10;
-          nextLowerYield = 1;
-        }
-
-        let repNeededToChange = null;
-        if (nextLowerThreshold !== null) {
-          const targetRepAtThreshold = Math.ceil(myClanRep * (1 + nextLowerThreshold / 100));
-          repNeededToChange = clan.reputation - targetRepAtThreshold;
-          if (repNeededToChange < 0) repNeededToChange = 0;
-        }
-
-        return {
-          ...clan,
-          isBleeding: false,
-          bleedAttackers: [],
-          bleedScore: 0,
-          bleedReason: 'Stable',
-          nextLowerThreshold,
-          nextLowerYield,
-          repNeededToChange,
-          timeToChange: null
-        };
-      });
-    }
-
-    const gainingClanIds = new Set(activelyGainingClans.map(c => c.id));
-    
-    return leaderboardAnalysis.map(clan => {
-      // Determine the next lower yield threshold percentage and the corresponding next yield value
+    // Helper: compute threshold/yield fields for any clan
+    const computeThresholdFields = (clan) => {
       let nextLowerThreshold = null;
       let nextLowerYield = null;
       if (clan.diffPercent > 25) {
@@ -932,7 +913,6 @@ function App() {
         repNeededToChange = clan.reputation - targetRepAtThreshold;
         if (repNeededToChange < 0) repNeededToChange = 0;
 
-        // Use recency-weighted velocity for loss rate estimation instead of just last tick
         const weightedLossRate = clan.avgWeightedVelocity < 0 ? -clan.avgWeightedVelocity : 0;
         
         let hoursPerTick = 6;
@@ -951,92 +931,321 @@ function App() {
         }
       }
 
-      // If this clan is itself actively gaining, it's not bleeding
+      return { nextLowerThreshold, nextLowerYield, repNeededToChange, timeToChange };
+    };
+
+    // Helper: infer the yield bracket an attacker is likely using.
+    // Looks at per-member gain to estimate the per-win yield, then maps to a bracket.
+    const inferYieldBracket = (attacker) => {
+      // Try to count active members gaining rep (those with member_list data)
+      let activeMembersGaining = 0;
+      let totalMemberGain = 0;
+
+      if (attacker.member_list && attacker.member_list.length > 0 && snapshots.length >= 2) {
+        const prevSnapshot = snapshots[snapshots.length - 2];
+        const prevClan = prevSnapshot ? prevSnapshot.clans.find(c => c.id === attacker.id) : null;
+
+        if (prevClan && prevClan.member_list) {
+          attacker.member_list.forEach(member => {
+            const prevMember = prevClan.member_list.find(m => m.id === member.id);
+            if (prevMember) {
+              const memberGain = member.reputation - prevMember.reputation;
+              if (memberGain > 0) {
+                activeMembersGaining++;
+                totalMemberGain += memberGain;
+              }
+            }
+          });
+        }
+      }
+
+      // Estimate per-member yield
+      let estimatedYieldPerWin = 6; // default fallback
+      if (activeMembersGaining > 0) {
+        const avgMemberGain = totalMemberGain / activeMembersGaining;
+        // Each member does multiple battles per tick; estimate wins per tick
+        // Typical: 3-10 battles per tick. Use the gain to find closest bracket.
+        // If avg member gain is 45 and yield is 15, that's ~3 wins. If yield is 6, ~7.5 wins.
+        // We check which bracket the per-member gain best fits by trying each bracket
+        // and seeing which gives the most reasonable battles-per-tick count (2-15 range).
+        let bestBracket = YIELD_BRACKETS[2]; // default +6
+        let bestFit = Infinity;
+
+        YIELD_BRACKETS.forEach(bracket => {
+          if (bracket.yield === 0) return;
+          const impliedBattles = avgMemberGain / bracket.yield;
+          // Reasonable battle count per tick: 1-20
+          if (impliedBattles >= 1 && impliedBattles <= 20) {
+            // Prefer brackets that give a battle count closest to 5 (most common)
+            const fit = Math.abs(impliedBattles - 5);
+            if (fit < bestFit) {
+              bestFit = fit;
+              bestBracket = bracket;
+            }
+          }
+        });
+
+        estimatedYieldPerWin = bestBracket.yield;
+      } else if (attacker.tickGain > 0) {
+        // Fallback: use total clan gain and estimated active members (~10-20)
+        const estimatedActiveMembers = Math.max(5, Math.min(30, attacker.members * 0.4));
+        const avgMemberGain = attacker.tickGain / estimatedActiveMembers;
+
+        let bestBracket = YIELD_BRACKETS[2];
+        let bestFit = Infinity;
+        YIELD_BRACKETS.forEach(bracket => {
+          if (bracket.yield === 0) return;
+          const impliedBattles = avgMemberGain / bracket.yield;
+          if (impliedBattles >= 1 && impliedBattles <= 20) {
+            const fit = Math.abs(impliedBattles - 5);
+            if (fit < bestFit) {
+              bestFit = fit;
+              bestBracket = bracket;
+            }
+          }
+        });
+        estimatedYieldPerWin = bestBracket.yield;
+      }
+
+      // Find the bracket
+      const bracket = YIELD_BRACKETS.find(b => b.yield === estimatedYieldPerWin) || YIELD_BRACKETS[2];
+      return bracket;
+    };
+
+    // Helper: given an attacker's rep and a yield bracket, compute the target clan rep range
+    const computeTargetRepRange = (attackerRep, bracket) => {
+      // bracket.minPercent/maxPercent define how much higher/lower the target is vs attacker
+      // e.g. +6 bracket: target is 0% to 10% higher → target rep = attackerRep * 1.0 to attackerRep * 1.10
+      const minRep = bracket.minPercent === -Infinity
+        ? 0
+        : Math.floor(attackerRep * (1 + bracket.minPercent / 100));
+      const maxRep = bracket.maxPercent === Infinity
+        ? Infinity
+        : Math.ceil(attackerRep * (1 + bracket.maxPercent / 100));
+      return { minRep, maxRep };
+    };
+
+    // No attackers → all stable
+    if (activelyGainingClans.length === 0) {
+      return leaderboardAnalysis.map(clan => ({
+        ...clan,
+        ...computeThresholdFields(clan),
+        isBleeding: false,
+        bleedAttackers: [],
+        bleedScore: 0,
+        bleedReason: 'Stable',
+      }));
+    }
+
+    const gainingClanIds = new Set(activelyGainingClans.map(c => c.id));
+
+    // ── Pass 1: For each attacker, infer target range and find matching clans ──
+    const attackerTargetMap = new Map(); // attackerId → { bracket, range, matchingClans[] }
+
+    activelyGainingClans.forEach(attacker => {
+      const bracket = inferYieldBracket(attacker);
+      const range = computeTargetRepRange(attacker.reputation, bracket);
+
+      // Find non-gaining clans whose rep falls in the inferred target range
+      const matchingClans = leaderboardAnalysis
+        .filter(c => {
+          if (gainingClanIds.has(c.id)) return false;
+          return c.reputation >= range.minRep && c.reputation <= range.maxRep;
+        })
+        .map(c => ({
+          clanId: c.id,
+          velocity: c.avgWeightedVelocity,
+          gain: c.gain,
+          normalizedActivity: c.normalizedActivity,
+          reputation: c.reputation,
+          rank: c.rank,
+        }))
+        .sort((a, b) => a.velocity - b.velocity); // lowest velocity first = most likely victim
+
+      attackerTargetMap.set(attacker.id, {
+        bracket,
+        range,
+        matchingClans,
+        attackerName: attacker.name,
+        attackerRep: attacker.reputation,
+        attackerGain: attacker.gain,
+      });
+    });
+
+    // ── Pass 2: Compute raw bleed scores per clan ──
+    const clanRawScores = new Map();
+
+    leaderboardAnalysis.forEach(clan => {
+      if (gainingClanIds.has(clan.id)) return;
+
+      // Find all attackers that have this clan in their inferred target range
+      const matchingAttackers = [];
+      attackerTargetMap.forEach((data, attackerId) => {
+        const match = data.matchingClans.find(c => c.clanId === clan.id);
+        if (match) {
+          matchingAttackers.push({
+            attackerId,
+            bracket: data.bracket,
+            positionInList: data.matchingClans.indexOf(match),
+            totalInList: data.matchingClans.length,
+            attackerName: data.attackerName,
+            attackerGain: data.attackerGain,
+          });
+        }
+      });
+
+      if (matchingAttackers.length === 0) return;
+
+      // Only consider clans that show weighted stagnancy
+      if (!clan.isWeightedStagnant) return;
+
+      let rawScore = 0;
+      let reasons = [];
+      let isPrimaryForAny = false;
+      const attackerDetails = [];
+
+      // ── Factor 1: Position in inferred target range per attacker ──
+      matchingAttackers.forEach(({ bracket, positionInList, totalInList, attackerName, attackerGain }) => {
+        attackerDetails.push(activelyGainingClans.find(a => a.name === attackerName));
+
+        // #1 match in range gets 30 points, decreasing for later positions
+        const positionScore = Math.max(5, 30 - (positionInList / Math.max(1, totalInList - 1)) * 25);
+        rawScore += positionScore;
+
+        if (positionInList === 0) {
+          isPrimaryForAny = true;
+          reasons.push(`⚡ Primary target for ${attackerName} (${bracket.label})`);
+        } else {
+          reasons.push(`In range of ${attackerName} (${bracket.label})`);
+        }
+      });
+
+      // ── Factor 2: Absolute velocity across entire reset ──
+      if (clan.avgWeightedVelocity <= -50) {
+        rawScore += 25;
+        reasons.push(`Strong rep loss (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
+      } else if (clan.avgWeightedVelocity <= 0) {
+        rawScore += 20;
+        reasons.push(`Stagnant/losing (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
+      } else if (clan.avgWeightedVelocity <= 30) {
+        rawScore += 12;
+        reasons.push(`Very low velocity (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
+      } else if (clan.avgWeightedVelocity <= 80) {
+        rawScore += 5;
+        reasons.push(`Low velocity (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
+      }
+
+      // ── Factor 3: Cumulative gain since reset (lowest = most suspicious) ──
+      if (clan.gain <= 0) {
+        rawScore += 15;
+        reasons.push("No cumulative gain since reset");
+      } else if (clan.gain < 100) {
+        rawScore += 8;
+        reasons.push(`Very low cumulative gain (+${clan.gain})`);
+      }
+
+      // ── Factor 4: Weighted stagnancy depth ──
+      if (clan.normalizedActivity <= -0.3) {
+        rawScore += 10;
+        reasons.push("Deeply stagnant (weighted)");
+      } else if (clan.normalizedActivity <= -0.1) {
+        rawScore += 5;
+        reasons.push("Stagnant (weighted)");
+      }
+
+      // ── Factor 5: Multiple attackers targeting same clan ──
+      if (matchingAttackers.length >= 3) {
+        rawScore += 8;
+        reasons.push(`Targeted by ${matchingAttackers.length} attackers`);
+      } else if (matchingAttackers.length >= 2) {
+        rawScore += 4;
+        reasons.push(`Targeted by ${matchingAttackers.length} attackers`);
+      }
+
+      clanRawScores.set(clan.id, {
+        rawScore,
+        reasons,
+        attackers: attackerDetails.filter(Boolean),
+        isPrimary: isPrimaryForAny,
+        velocity: clan.avgWeightedVelocity,
+      });
+    });
+
+    // ── Pass 3: Cross-context suppression ──
+    // For each attacker, if there's a clear primary victim in the inferred range,
+    // suppress scores of other high-velocity clans in the same range.
+    attackerTargetMap.forEach((data) => {
+      const { matchingClans } = data;
+      if (matchingClans.length < 2) return;
+
+      const primaryVictim = matchingClans[0]; // lowest velocity
+      const secondVictim = matchingClans[1];
+
+      // "Clear primary" = significantly lower velocity than the second candidate
+      const velocityGap = secondVictim.velocity - primaryVictim.velocity;
+      const isClearPrimary = velocityGap > 50 || (primaryVictim.velocity <= 0 && secondVictim.velocity > 50);
+
+      if (!isClearPrimary) return;
+
+      // Suppress others proportionally to velocity gap from primary
+      for (let i = 1; i < matchingClans.length; i++) {
+        const victim = matchingClans[i];
+        const scoreData = clanRawScores.get(victim.clanId);
+        if (!scoreData) continue;
+
+        const relativeVelocity = victim.velocity - primaryVictim.velocity;
+        let suppressionFactor = 1.0;
+        if (relativeVelocity > 200) {
+          suppressionFactor = 0.2;
+        } else if (relativeVelocity > 100) {
+          suppressionFactor = 0.4;
+        } else if (relativeVelocity > 50) {
+          suppressionFactor = 0.6;
+        } else {
+          suppressionFactor = 0.85;
+        }
+
+        scoreData.rawScore = Math.round(scoreData.rawScore * suppressionFactor);
+        if (suppressionFactor < 0.8) {
+          scoreData.reasons.push('Score reduced — clear primary target nearby');
+        }
+      }
+    });
+
+    // ── Build final results ──
+    return leaderboardAnalysis.map(clan => {
+      const thresholdFields = computeThresholdFields(clan);
+
       if (gainingClanIds.has(clan.id)) {
-        return { 
-          ...clan, 
-          isBleeding: false, 
+        return {
+          ...clan,
+          ...thresholdFields,
+          isBleeding: false,
           bleedAttackers: [],
           bleedScore: 0,
           bleedReason: 'Stable',
-          nextLowerThreshold,
-          nextLowerYield,
-          repNeededToChange,
-          timeToChange
         };
       }
 
-      // Find nearby clans that ARE gaining (within ±10 ranks)
-      const nearbyAttackers = activelyGainingClans.filter(gc => {
-        const rankDiff = Math.abs(gc.rank - clan.rank);
-        return rankDiff <= 10 && rankDiff > 0;
-      });
-
-      // A clan is bleeding if:
-      // - It's NOT gaining AND there are nearby clans that ARE gaining
-      // - It's stagnant based on weighted analysis across all snapshots since reset
-      //   (not just a single tick — avoids false positives from momentary pauses)
-      const isBleeding = clan.isWeightedStagnant && nearbyAttackers.length > 0;
-      
-      // Calculate Bleed Score
-      let bleedScore = 0;
-      let reasons = [];
-
-      if (isBleeding) {
-        // Factor 1: Weighted stagnancy severity
-        // Use normalizedActivity to grade how deeply stagnant the clan is
-        if (clan.normalizedActivity <= -0.3) {
-          bleedScore += 55;
-          reasons.push("Deeply stagnant (weighted)");
-        } else if (clan.normalizedActivity <= -0.1) {
-          bleedScore += 50;
-          reasons.push("Stagnant (weighted)");
-        } else {
-          bleedScore += 40;
-          reasons.push("Weakly stagnant (weighted)");
-        }
-
-        // Factor 1b: Latest tick confirms stagnancy
-        if (clan.tickGain < 0) {
-          bleedScore += 5;
-          reasons.push(`Latest tick: ${clan.tickGain.toLocaleString()} rep`);
-        }
-
-        if (clan.gain <= 0) {
-          bleedScore += 15;
-          reasons.push("No cumulative gain since reset");
-        }
-
-        // Factor 2: Nearby active attackers
-        const attackerCount = nearbyAttackers.length;
-        if (attackerCount > 0) {
-          const attackerPoints = Math.min(25, attackerCount * 8);
-          bleedScore += attackerPoints;
-          reasons.push(`${attackerCount} nearby attackers`);
-        }
-
-        // Factor 3: Attacker speed
-        const maxAttackerGain = Math.max(...nearbyAttackers.map(a => a.gain), 0);
-        if (maxAttackerGain > 1500) {
-          bleedScore += 10;
-          reasons.push("High intensity farm nearby");
-        } else if (maxAttackerGain > 500) {
-          bleedScore += 5;
-        }
+      const scoreData = clanRawScores.get(clan.id);
+      if (!scoreData) {
+        return {
+          ...clan,
+          ...thresholdFields,
+          isBleeding: false,
+          bleedAttackers: [],
+          bleedScore: 0,
+          bleedReason: 'Stable',
+        };
       }
 
-      const bleedReason = reasons.join(" | ") || "Stable";
-      
-      return { 
-        ...clan, 
-        isBleeding, 
-        bleedAttackers: nearbyAttackers,
-        bleedScore: Math.min(100, bleedScore),
-        bleedReason,
-        nextLowerThreshold,
-        nextLowerYield,
-        repNeededToChange,
-        timeToChange
+      return {
+        ...clan,
+        ...thresholdFields,
+        isBleeding: true,
+        bleedAttackers: scoreData.attackers,
+        bleedScore: Math.min(100, scoreData.rawScore),
+        bleedReason: scoreData.reasons.join(' | ') || 'Stable',
       };
     });
   }, [leaderboardAnalysis, activelyGainingClans, targetClanData, snapshots]);
