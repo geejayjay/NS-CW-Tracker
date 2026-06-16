@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import sampleResponse from '../sample-response.json';
+import { YIELD_BRACKETS, ANALYSIS_CONFIG } from './constants';
 import './App.css';
 
 // SVG Icons for clean UI without installing extra packages
@@ -899,7 +900,7 @@ function App() {
       // A tick where the clan was stagnant (0 gain) or lost rep adds -weight * 0.5.
       // This means a clan that was gaining 3 ticks ago but stopped still has residual
       // "activity heat" and won't be instantly removed from the gaining list.
-      const DECAY_BASE = 0.65;
+      const DECAY_BASE = ANALYSIS_CONFIG.DECAY_BASE;
       let activityScore = 0;
       let maxPossibleScore = 0;
       let totalPairs = 0;
@@ -952,8 +953,8 @@ function App() {
       // Entry threshold is easy (start showing as gaining quickly).
       // Exit threshold is much harder (stay locked until strong contradicting evidence).
       // This uses the ENTIRE reset's cumulative data, not just the latest tick.
-      const GAIN_ENTRY_THRESHOLD = 0.15;  // normalized activity to ENTER gaining
-      const GAIN_EXIT_THRESHOLD = -0.15;  // normalized activity to EXIT gaining (much lower)
+      const GAIN_ENTRY_THRESHOLD = ANALYSIS_CONFIG.GAIN_ENTRY_THRESHOLD;
+      const GAIN_EXIT_THRESHOLD = ANALYSIS_CONFIG.GAIN_EXIT_THRESHOLD;
       const wasGaining = activeGainingLocks.current.has(clan.id);
 
       let isActivelyGaining;
@@ -978,8 +979,8 @@ function App() {
       // ── Hysteresis for "weighted stagnant" (bleed candidate) ──
       // Entry: must show sustained stagnancy across reset.
       // Exit: must show meaningful gain across reset to break out.
-      const STAGNANT_ENTRY_THRESHOLD = -0.1;  // normalized activity to ENTER stagnant
-      const STAGNANT_EXIT_THRESHOLD = 0.2;    // normalized activity to EXIT stagnant (must show real recovery)
+      const STAGNANT_ENTRY_THRESHOLD = ANALYSIS_CONFIG.STAGNANT_ENTRY_THRESHOLD;
+      const STAGNANT_EXIT_THRESHOLD = ANALYSIS_CONFIG.STAGNANT_EXIT_THRESHOLD;
       const wasStagnant = bleedingLocks.current.has(clan.id);
 
       let isWeightedStagnant;
@@ -1043,23 +1044,7 @@ function App() {
     return leaderboardAnalysis.filter(c => c.isActivelyGaining && c.gain > 0);
   }, [leaderboardAnalysis]);
 
-  // ── Yield Bracket Configuration ──
-  // Maps per-win reputation gain → the target clan's rep range relative to the attacker.
-  // When attacking a bleeding clan, you earn rep based on how their total rep compares to yours.
-  // By reverse-engineering the yield from the attacker's gain, we can infer which rep range
-  // the target falls in, and thus identify the actual victim clan.
-  //
-  // Format: { yield, minPercent, maxPercent, label }
-  //   - yield: rep gained per battle win
-  //   - minPercent/maxPercent: target clan rep is this % relative to attacker's clan rep
-  //     e.g. minPercent=10, maxPercent=25 means target rep is 10%-25% HIGHER than attacker
-  const YIELD_BRACKETS = [
-    { yield: 15, minPercent: 25,  maxPercent: Infinity, label: '+15 (>25% higher)' },
-    { yield: 10, minPercent: 10,  maxPercent: 25,       label: '+10 (10-25% higher)' },
-    { yield: 6,  minPercent: 0,   maxPercent: 10,       label: '+6 (0-10% higher)' },
-    { yield: 3,  minPercent: -10, maxPercent: 0,        label: '+3 (0-10% lower)' },
-    { yield: 1,  minPercent: -Infinity, maxPercent: -10, label: '+1 (>10% lower)' },
-  ];
+  // YIELD_BRACKETS and ANALYSIS_CONFIG are imported from './constants'
 
   // Identify possible bleed targets using yield-bracket inference.
   //
@@ -1162,10 +1147,9 @@ function App() {
         YIELD_BRACKETS.forEach(bracket => {
           if (bracket.yield === 0) return;
           const impliedBattles = avgMemberGain / bracket.yield;
-          // Reasonable battle count per tick: 1-20
-          if (impliedBattles >= 1 && impliedBattles <= 20) {
-            // Prefer brackets that give a battle count closest to 5 (most common)
-            const fit = Math.abs(impliedBattles - 5);
+          if (impliedBattles >= ANALYSIS_CONFIG.MIN_BATTLES_PER_TICK && impliedBattles <= ANALYSIS_CONFIG.MAX_BATTLES_PER_TICK) {
+            // Prefer brackets that give a battle count closest to target (most common)
+            const fit = Math.abs(impliedBattles - ANALYSIS_CONFIG.TARGET_BATTLES_PER_TICK);
             if (fit < bestFit) {
               bestFit = fit;
               bestBracket = bracket;
@@ -1176,7 +1160,7 @@ function App() {
         estimatedYieldPerWin = bestBracket.yield;
       } else if (attacker.tickGain > 0) {
         // Fallback: use total clan gain and estimated active members (~10-20)
-        const estimatedActiveMembers = Math.max(5, Math.min(30, attacker.members * 0.4));
+        const estimatedActiveMembers = Math.max(5, Math.min(30, attacker.members * ANALYSIS_CONFIG.FALLBACK_ACTIVE_MEMBER_RATIO));
         const avgMemberGain = attacker.tickGain / estimatedActiveMembers;
 
         let bestBracket = YIELD_BRACKETS[2];
@@ -1184,8 +1168,8 @@ function App() {
         YIELD_BRACKETS.forEach(bracket => {
           if (bracket.yield === 0) return;
           const impliedBattles = avgMemberGain / bracket.yield;
-          if (impliedBattles >= 1 && impliedBattles <= 20) {
-            const fit = Math.abs(impliedBattles - 5);
+          if (impliedBattles >= ANALYSIS_CONFIG.MIN_BATTLES_PER_TICK && impliedBattles <= ANALYSIS_CONFIG.MAX_BATTLES_PER_TICK) {
+            const fit = Math.abs(impliedBattles - ANALYSIS_CONFIG.TARGET_BATTLES_PER_TICK);
             if (fit < bestFit) {
               bestFit = fit;
               bestBracket = bracket;
@@ -1260,11 +1244,110 @@ function App() {
       });
     });
 
+    // ── Pass 1.5: Slow-Gainer Bleed Detection ──
+    // Detects gaining clans that are likely being bled while also farming.
+    // Key insight: if most clans in a yield range gain at +6 rate but one
+    // only gains at +3 rate, the slow one is probably being bled.
+    //
+    // Algorithm:
+    //   1. Compute gain-per-active-member for each gaining clan
+    //   2. For each attacker, find OTHER gaining clans in its target range
+    //   3. Compare their gain rate to the median — flag outlier slow gainers
+    const slowGainerCandidates = new Map(); // clanId → { gainRate, medianRate, attackers[] }
+
+    // Helper: estimate gain per active member for a clan
+    const computeGainPerActiveMember = (clan) => {
+      if (clan.member_list && clan.member_list.length > 0 && activeSnapshots.length >= 2) {
+        const prevSnapshot = activeSnapshots[activeSnapshots.length - 2];
+        const prevClan = prevSnapshot ? prevSnapshot.clans.find(c => c.id === clan.id) : null;
+        if (prevClan && prevClan.member_list) {
+          let activeMembersGaining = 0;
+          let totalMemberGain = 0;
+          clan.member_list.forEach(member => {
+            const prevMember = prevClan.member_list.find(m => m.id === member.id);
+            if (prevMember) {
+              const memberGain = member.reputation - prevMember.reputation;
+              if (memberGain > 0) {
+                activeMembersGaining++;
+                totalMemberGain += memberGain;
+              }
+            }
+          });
+          if (activeMembersGaining > 0) {
+            return totalMemberGain / activeMembersGaining;
+          }
+        }
+      }
+      // Fallback: estimate from total clan gain
+      if (clan.tickGain > 0 && clan.members > 0) {
+        const estimatedActive = Math.max(5, Math.min(30, clan.members * ANALYSIS_CONFIG.FALLBACK_ACTIVE_MEMBER_RATIO));
+        return clan.tickGain / estimatedActive;
+      }
+      return clan.gain > 0 ? clan.gain / Math.max(1, clan.members * ANALYSIS_CONFIG.FALLBACK_ACTIVE_MEMBER_RATIO) : 0;
+    };
+
+    // Compute gain rates for ALL gaining clans
+    const gainingClanRates = new Map();
+    activelyGainingClans.forEach(c => {
+      gainingClanRates.set(c.id, computeGainPerActiveMember(c));
+    });
+
+    // Compute median gain rate across all gaining clans
+    const allGainRates = [...gainingClanRates.values()].filter(r => r > 0).sort((a, b) => a - b);
+    const medianGainRate = allGainRates.length > 0
+      ? allGainRates[Math.floor(allGainRates.length / 2)]
+      : 1;
+
+    // For each attacker, check if any OTHER gaining clans fall in its target range
+    // and have a significantly lower gain rate
+    if (activelyGainingClans.length >= 2) {
+      attackerTargetMap.forEach((data, attackerId) => {
+        const { range, bracket, attackerName } = data;
+
+        // Find gaining clans (excluding the attacker itself) whose rep is in this target range
+        const gainingInRange = activelyGainingClans.filter(c => {
+          if (c.id === attackerId) return false;
+          return c.reputation >= range.minRep && c.reputation <= range.maxRep;
+        });
+
+        if (gainingInRange.length === 0) return;
+
+        gainingInRange.forEach(candidate => {
+          const candidateRate = gainingClanRates.get(candidate.id) || 0;
+
+          // Flag if gain rate is ≤ threshold × median
+          if (candidateRate > 0 && candidateRate <= medianGainRate * ANALYSIS_CONFIG.SLOW_GAINER_THRESHOLD) {
+            const existing = slowGainerCandidates.get(candidate.id);
+            const attackerInfo = {
+              attackerId,
+              attackerName,
+              bracket,
+            };
+
+            if (existing) {
+              existing.attackers.push(attackerInfo);
+            } else {
+              slowGainerCandidates.set(candidate.id, {
+                gainRate: candidateRate,
+                medianRate: medianGainRate,
+                ratio: candidateRate / medianGainRate,
+                attackers: [attackerInfo],
+              });
+            }
+          }
+        });
+      });
+    }
+
     // ── Pass 2: Compute raw bleed scores per clan ──
+    // Now includes both stagnant clans AND slow-gainer candidates.
     const clanRawScores = new Map();
 
     leaderboardAnalysis.forEach(clan => {
-      if (gainingClanIds.has(clan.id)) return;
+      const isSlowGainer = slowGainerCandidates.has(clan.id);
+
+      // Skip gaining clans UNLESS they are slow-gainer candidates
+      if (gainingClanIds.has(clan.id) && !isSlowGainer) return;
 
       // Find all attackers that have this clan in their inferred target range
       const matchingAttackers = [];
@@ -1282,10 +1365,12 @@ function App() {
         }
       });
 
-      if (matchingAttackers.length === 0) return;
+      if (matchingAttackers.length === 0 && !isSlowGainer) return;
 
-      // Only consider clans that show weighted stagnancy
-      if (!clan.isWeightedStagnant) return;
+      // For stagnant (non-gaining) clans, require weighted stagnancy.
+      // For slow-gainer candidates, skip the stagnancy check — they ARE gaining,
+      // just at a suspiciously low rate.
+      if (!isSlowGainer && !clan.isWeightedStagnant) return;
 
       let rawScore = 0;
       let reasons = [];
@@ -1350,6 +1435,34 @@ function App() {
         reasons.push(`Targeted by ${matchingAttackers.length} attackers`);
       }
 
+      // ── Factor 6: Slow-gainer detection (gaining-but-bleeding) ──
+      if (isSlowGainer) {
+        const sgData = slowGainerCandidates.get(clan.id);
+        const ratioPercent = Math.round(sgData.ratio * 100);
+
+        // Score based on how far below the median the gain rate is
+        // ratio ≤ 25% of median → +20 pts, ≤ 50% → +12 pts
+        if (sgData.ratio <= 0.25) {
+          rawScore += 20;
+          reasons.push(`🐌 Very slow gainer (${ratioPercent}% of median rate)`);
+        } else {
+          rawScore += 12;
+          reasons.push(`🐌 Slow gainer (${ratioPercent}% of median rate)`);
+        }
+
+        // Add attacker context from slow-gainer detection
+        sgData.attackers.forEach(({ attackerName, bracket }) => {
+          const alreadyListed = matchingAttackers.some(a => a.attackerName === attackerName);
+          if (!alreadyListed) {
+            attackerDetails.push(activelyGainingClans.find(a => a.name === attackerName));
+            reasons.push(`In range of ${attackerName} (${bracket.label}) — slow gainer`);
+          }
+        });
+
+        // Cap score for slow-gainer candidates (weaker signal than stagnant clans)
+        rawScore = Math.min(rawScore, ANALYSIS_CONFIG.SLOW_GAINER_MAX_SCORE);
+      }
+
       clanRawScores.set(clan.id, {
         rawScore,
         reasons,
@@ -1410,6 +1523,20 @@ function App() {
       const thresholdFields = computeThresholdFields(clan);
 
       if (gainingClanIds.has(clan.id)) {
+        // Check if this gaining clan is a slow-gainer bleed candidate
+        const scoreData = clanRawScores.get(clan.id);
+        if (scoreData) {
+          // Slow-gainer: gaining but likely being bled
+          newBleedingLockIds.add(clan.id);
+          return {
+            ...clan,
+            ...thresholdFields,
+            isBleeding: true,
+            bleedAttackers: scoreData.attackers,
+            bleedScore: Math.min(ANALYSIS_CONFIG.SLOW_GAINER_MAX_SCORE, scoreData.rawScore),
+            bleedReason: scoreData.reasons.join(' | ') || 'Stable',
+          };
+        }
         if (!viewHistoryMode) {
           bleedingLocks.current.delete(clan.id);
         }

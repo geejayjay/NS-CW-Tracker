@@ -32,7 +32,7 @@ If the target clan is **Bleeding**, your gain per victory scales dynamically bas
 > [!NOTE]
 > If a clan is **not** in a bleeding state, attacks on them will yield **0 reputation** per victory, regardless of the reputation difference.
 
-These brackets are defined as the `YIELD_BRACKETS` constant in `App.jsx` and can be extended with additional tiers.
+These brackets are defined in the `YIELD_BRACKETS` constant in `src/constants.js` alongside all analysis tuning parameters (`ANALYSIS_CONFIG`). Both can be extended or adjusted without touching the main `App.jsx` logic.
 
 ---
 
@@ -77,11 +77,40 @@ The inferred yield bracket maps to a percentage range of the **target clan's rep
 
 ### Step 4: Match Clans in the Inferred Range
 
-Instead of using ±10 rank proximity, the tracker finds **non-gaining clans whose actual reputation falls within the computed range**. This is much more precise than rank-based proximity.
+Instead of using ±10 rank proximity, the tracker finds **clans whose actual reputation falls within the computed range**. This includes:
+* **Non-gaining clans** (stagnant or losing rep) — traditional bleed candidates
+* **Gaining clans** that fall in range — evaluated by Step 4.5 for slow-gainer detection
+
+### Step 4.5: Slow-Gainer Bleed Detection (Gaining-But-Bleeding)
+
+A clan can be **both gaining rep AND being bled** if its own members are farming while attackers bleed it. The tracker detects this by comparing **gain-per-active-member** rates:
+
+1. Compute `gainPerActiveMember` for each actively gaining clan (using per-member rep deltas, or estimated from total clan gain with ~40% active ratio as fallback).
+2. Compute the **median gain rate** across all gaining clans.
+3. For each attacker, find other gaining clans in its inferred target range.
+4. Flag a gaining clan as a **slow gainer** if its gain rate is ≤ `SLOW_GAINER_THRESHOLD` × median rate (default: 50%).
+
+| Gain Rate vs Median | Detection |
+| :--- | :--- |
+| ≤ 25% of median | 🐌 **Very slow gainer** (+20 pts) |
+| ≤ 50% of median | 🐌 **Slow gainer** (+12 pts) |
+| > 50% of median | Not flagged |
+
+> [!NOTE]
+> **Examples:**
+> * Top 2-5 all gain at +6 rate, top 1 only gains at +3 rate → top 1 is flagged as slow gainer (it's the only one in range gaining much slower)
+> * Top 3 gains +6, top 1 and 2 gain +3 → both flagged; the one with the lower per-member rate scores higher
+> * All clans gaining at similar rates → no false positives (no one is ≤ 50% of median)
+
+Slow-gainer bleed scores are **capped at 60** (medium confidence) since the signal is inherently weaker than a fully stagnant clan. The threshold and cap are configurable via `ANALYSIS_CONFIG.SLOW_GAINER_THRESHOLD` and `ANALYSIS_CONFIG.SLOW_GAINER_MAX_SCORE` in `src/constants.js`.
 
 ### Step 5: Score and Rank Bleed Candidates
 
-Only clans that are both **in an attacker's inferred range** and **weighted-stagnant across the reset** are scored. The stagnancy check also uses hysteresis:
+Clans qualify for scoring if they are **either**:
+* In an attacker's inferred range **AND weighted-stagnant** across the reset, OR
+* Flagged as a **slow-gainer candidate** by Step 4.5
+
+The stagnancy check uses hysteresis:
 
 | Transition | Condition |
 | :--- | :--- |
@@ -90,7 +119,7 @@ Only clans that are both **in an attacker's inferred range** and **weighted-stag
 
 > [!IMPORTANT]
 > **Roster Inactivity ≠ Bleeding**:
-> A high percentage of inactive or zero-contribution members indicates poor clan management, but it **does not** automatically classify a clan as bleeding. Bleeding is purely defined by reputation stagnancy + being in an attacker's inferred yield range.
+> A high percentage of inactive or zero-contribution members indicates poor clan management, but it **does not** automatically classify a clan as bleeding. Bleeding is purely defined by reputation stagnancy + being in an attacker's inferred yield range, or by slow-gainer detection.
 
 ---
 
@@ -143,6 +172,18 @@ Every clan identified as potentially bleeding is assigned a **Bleed Score** (0�
 | :--- | :---: |
 | Targeted by **3+** attackers | **+8** |
 | Targeted by **2** attackers | **+4** |
+
+### Factor 6: Slow-Gainer Detection (max 20 pts, score capped at 60)
+
+Applied only to gaining clans flagged by Step 4.5 as slow-gainer bleed candidates:
+
+| Condition | Points |
+| :--- | :---: |
+| Gain rate ≤ **25%** of median | **+20** |
+| Gain rate ≤ **50%** of median | **+12** |
+
+> [!NOTE]
+> Slow-gainer candidates have their **total score capped at 60** (`SLOW_GAINER_MAX_SCORE`) regardless of other factors. This reflects the inherently weaker signal compared to fully stagnant clans.
 
 ### Cross-Context Suppression
 
