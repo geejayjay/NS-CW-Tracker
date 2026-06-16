@@ -116,6 +116,8 @@ function App() {
   // Cleared on reset boundary so each 30-min cycle starts fresh.
   const gainingLocks = React.useRef(new Map());
   const bleedingLocks = React.useRef(new Map());
+  const attackerBrackets = React.useRef(new Map());
+  const prevBleedingIdsRef = React.useRef([]);
 
   // Reset grace period states
   const [inResetGracePeriod, setInResetGracePeriod] = useState(false);
@@ -155,7 +157,25 @@ function App() {
       (() => {
         try {
           const stored = localStorage.getItem('ns_cw_last_reset_bleeding_locks');
-          return stored ? JSON.parse(stored).map(id => [id, true]) : [];
+          if (!stored) return [];
+          const parsed = JSON.parse(stored);
+          if (parsed.length > 0 && (!Array.isArray(parsed[0]) || parsed[0].length !== 2)) {
+            // Old format: plain array of IDs
+            return parsed.map(id => [id, { lastDetectedTime: Date.now(), lastDetectedIndex: 0, attackers: [], bleedScore: 50, bleedReason: 'Historical' }]);
+          }
+          return parsed;
+        } catch (e) {
+          return [];
+        }
+      })()
+    )
+  );
+  const lastResetAttackerBrackets = React.useRef(
+    new Map(
+      (() => {
+        try {
+          const stored = localStorage.getItem('ns_cw_last_reset_attacker_brackets');
+          return stored ? JSON.parse(stored) : [];
         } catch (e) {
           return [];
         }
@@ -357,6 +377,7 @@ function App() {
     // Clear hysteresis locks so the new cycle starts with fresh analysis
     gainingLocks.current.clear();
     bleedingLocks.current.clear();
+    attackerBrackets.current.clear();
 
     const activeRankings = newRankings || rankings;
 
@@ -458,11 +479,13 @@ function App() {
           localStorage.setItem('ns_cw_last_reset_snapshots', JSON.stringify(currentSnaps));
           localStorage.setItem('ns_cw_last_reset_rankings', JSON.stringify(currentRanks));
           
-          // Capture current locks for history
+          // Capture current locks and bracket cache for history
           lastResetGainingLocks.current = new Map(gainingLocks.current);
           lastResetBleedingLocks.current = new Map(bleedingLocks.current);
+          lastResetAttackerBrackets.current = new Map(attackerBrackets.current);
           localStorage.setItem('ns_cw_last_reset_gaining_locks', JSON.stringify([...gainingLocks.current.keys()]));
-          localStorage.setItem('ns_cw_last_reset_bleeding_locks', JSON.stringify([...bleedingLocks.current.keys()]));
+          localStorage.setItem('ns_cw_last_reset_bleeding_locks', JSON.stringify([...bleedingLocks.current.entries()]));
+          localStorage.setItem('ns_cw_last_reset_attacker_brackets', JSON.stringify([...attackerBrackets.current.entries()]));
         }
       }
 
@@ -567,67 +590,33 @@ function App() {
       }
     }
 
-    // 2. Check for NEW bleeding clans
+    // 2. Check for NEW bleeding clans using the stable bleedAnalysis results
     const latestSnapshot = snapshots[snapshots.length - 1];
-    const secondLatestSnapshot = snapshots[snapshots.length - 2];
-    let newBleeds = [];
+    const currBleedingIds = bleedAnalysis.filter(c => c.isBleeding).map(c => c.id);
+    const prevBleedingIds = prevBleedingIdsRef.current || [];
+    
+    // Find if any clan is bleeding now but was not in the previous tick
+    const newBleeds = currBleedingIds.filter(id => !prevBleedingIds.includes(id));
+    
+    // Update ref for next tick
+    prevBleedingIdsRef.current = currBleedingIds;
 
-    if (latestSnapshot && secondLatestSnapshot) {
-      // Helper function to dynamically identify bleeding IDs in any snapshot comparison
-      const getBleedingIds = (snap, prevSnap) => {
-        if (!snap || !prevSnap) return [];
-        
-        // Actively gaining clans (farming)
-        const gaining = snap.clans.filter(c => {
-          const prevC = prevSnap.clans.find(pc => pc.id === c.id);
-          return prevC && c.reputation > prevC.reputation;
-        });
-        
-        if (gaining.length === 0) return [];
-        const gainingIds = new Set(gaining.map(g => g.id));
-
-        // Bleeding target IDs
-        return snap.clans.filter(c => {
-          if (gainingIds.has(c.id)) return false;
-          
-          // Nearby attackers (within 10 ranks)
-          const hasNearbyAttacker = gaining.some(gc => Math.abs(gc.rank - c.rank) <= 10 && gc.rank !== c.rank);
-          
-          // Stagnancy check
-          const prevC = prevSnap.clans.find(pc => pc.id === c.id);
-          const isStagnant = prevC ? c.reputation <= prevC.reputation : true;
-          
-          return isStagnant && hasNearbyAttacker;
-        }).map(c => c.id);
-      };
-
-      const currBleedingList = getBleedingIds(latestSnapshot, secondLatestSnapshot);
-      
-      const prevSnapshotThree = snapshots.length >= 3 ? snapshots[snapshots.length - 3] : null;
-      const prevBleedingList = prevSnapshotThree ? getBleedingIds(secondLatestSnapshot, prevSnapshotThree) : [];
-
-      // Find if any clan is bleeding now but was not in the previous tick
-      newBleeds = currBleedingList.filter(id => !prevBleedingList.includes(id));
-      
-      if (newBleeds.length > 0) {
-        // New bleeding clan detected! 1s burst for 5 ticks to capture per-member
-        // rep changes (needed for yield bracket inference). After that, the
-        // hysteresis + weighted analysis has enough data and we slow down.
-        setHighSpeedTicksRemaining(5);
-        desiredInterval = 1;
-      } else if (highSpeedTicksRemaining > 0) {
-        // Still in the 1s member-data capture burst
-        desiredInterval = 1;
-      } else if (isGaining || currBleedingList.length > 0) {
-        // Active scenario (gaining or established bleeds) — 5s monitoring
-        // is fast enough to track changes without hammering the API
-        desiredInterval = 5;
-      } else {
-        // Standby — nothing happening, check every 60s
-        desiredInterval = 60;
-      }
-    } else if (isGaining) {
+    if (newBleeds.length > 0) {
+      // New bleeding clan detected! 1s burst for 5 ticks to capture per-member
+      // rep changes (needed for yield bracket inference). After that, the
+      // hysteresis + weighted analysis has enough data and we slow down.
+      setHighSpeedTicksRemaining(5);
+      desiredInterval = 1;
+    } else if (highSpeedTicksRemaining > 0) {
+      // Still in the 1s member-data capture burst
+      desiredInterval = 1;
+    } else if (isGaining || currBleedingIds.length > 0) {
+      // Active scenario (gaining or established bleeds) — 5s monitoring
+      // is fast enough to track changes without hammering the API
       desiredInterval = 5;
+    } else {
+      // Standby — nothing happening, check every 60s
+      desiredInterval = 60;
     }
 
     if (pollingInterval !== desiredInterval) {
@@ -668,7 +657,7 @@ function App() {
         }
       }
     }
-  }, [rankings, targetClanId, snapshots, highSpeedTicksRemaining, pollingInterval, lastNotifiedTime, enableSound, enableNotifications, notifyGaining, notifyBleeding]);
+  }, [rankings, targetClanId, snapshots, highSpeedTicksRemaining, pollingInterval, lastNotifiedTime, enableSound, enableNotifications, notifyGaining, notifyBleeding, bleedAnalysis]);
 
   const triggerAutoPoll = () => {
     if (simulationMode) {
@@ -1133,7 +1122,7 @@ function App() {
       }
 
       // Estimate per-member yield
-      let estimatedYieldPerWin = 6; // default fallback
+      let estimatedYieldPerWin = null;
       if (activeMembersGaining > 0) {
         const avgMemberGain = totalMemberGain / activeMembersGaining;
         // Each member does multiple battles per tick; estimate wins per tick
@@ -1179,9 +1168,23 @@ function App() {
         estimatedYieldPerWin = bestBracket.yield;
       }
 
-      // Find the bracket
-      const bracket = YIELD_BRACKETS.find(b => b.yield === estimatedYieldPerWin) || YIELD_BRACKETS[2];
-      return bracket;
+      const activeAttackerBrackets = viewHistoryMode ? lastResetAttackerBrackets : attackerBrackets;
+
+      if (estimatedYieldPerWin !== null) {
+        const inferredBracket = YIELD_BRACKETS.find(b => b.yield === estimatedYieldPerWin) || YIELD_BRACKETS[2];
+        if (!viewHistoryMode) {
+          activeAttackerBrackets.current.set(attacker.id, inferredBracket);
+        }
+        return inferredBracket;
+      }
+
+      // If tick gain is 0, attempt to retrieve the previously cached bracket for this attacker
+      if (activeAttackerBrackets.current.has(attacker.id)) {
+        return activeAttackerBrackets.current.get(attacker.id);
+      }
+
+      // Default fallback
+      return YIELD_BRACKETS[2];
     };
 
     // Helper: given an attacker's rep and a yield bracket, compute the target clan rep range
@@ -1517,7 +1520,7 @@ function App() {
     // Once a clan is identified as bleeding, it stays locked until strong recovery
     // evidence across the whole reset period (not just one good tick).
     const activeBleedingLocks = viewHistoryMode ? lastResetBleedingLocks : bleedingLocks;
-    const newBleedingLockIds = new Set();
+    const newBleedingLocks = new Map();
 
     const results = leaderboardAnalysis.map(clan => {
       const thresholdFields = computeThresholdFields(clan);
@@ -1527,19 +1530,71 @@ function App() {
         const scoreData = clanRawScores.get(clan.id);
         if (scoreData) {
           // Slow-gainer: gaining but likely being bled
-          newBleedingLockIds.add(clan.id);
+          const lockObj = {
+            lastDetectedTime: Date.now(),
+            lastDetectedIndex: activeSnapshots.length - 1,
+            attackers: scoreData.attackers,
+            bleedScore: Math.min(ANALYSIS_CONFIG.SLOW_GAINER_MAX_SCORE, scoreData.rawScore),
+            bleedReason: scoreData.reasons.join(' | ') || '🐌 Slow gainer — possible bleed-while-gaining',
+          };
+          if (!viewHistoryMode) {
+            newBleedingLocks.set(clan.id, lockObj);
+          }
           return {
             ...clan,
             ...thresholdFields,
             isBleeding: true,
             bleedAttackers: scoreData.attackers,
-            bleedScore: Math.min(ANALYSIS_CONFIG.SLOW_GAINER_MAX_SCORE, scoreData.rawScore),
-            bleedReason: scoreData.reasons.join(' | ') || 'Stable',
+            bleedScore: lockObj.bleedScore,
+            bleedReason: lockObj.bleedReason,
           };
         }
-        if (!viewHistoryMode) {
-          bleedingLocks.current.delete(clan.id);
+
+        // If not actively detected, but was previously locked as a slow-gainer (or stagnant) bleed target,
+        // evaluate cooldown exit condition
+        const wasBleedingLocked = activeBleedingLocks.current.has(clan.id);
+        if (wasBleedingLocked) {
+          const lockInfo = activeBleedingLocks.current.get(clan.id);
+          const lastDetectedTime = lockInfo && typeof lockInfo === 'object' ? lockInfo.lastDetectedTime : Date.now();
+          const lastDetectedIndex = lockInfo && typeof lockInfo === 'object' ? lockInfo.lastDetectedIndex : activeSnapshots.length - 1;
+          const lastAttackers = lockInfo && typeof lockInfo === 'object' ? lockInfo.attackers : [];
+          const lastScore = lockInfo && typeof lockInfo === 'object' ? lockInfo.bleedScore : 50;
+          const lastReason = lockInfo && typeof lockInfo === 'object' ? lockInfo.bleedReason : 'Locked — slow gainer';
+
+          const secondsElapsed = (Date.now() - lastDetectedTime) / 1000;
+          const ticksElapsed = activeSnapshots.length - 1 - lastDetectedIndex;
+
+          const cooldownExpired = secondsElapsed >= ANALYSIS_CONFIG.BLEED_PERSISTENCE_DURATION &&
+                                  ticksElapsed >= ANALYSIS_CONFIG.BLEED_PERSISTENCE_TICKS;
+          
+          // Recovery check for slow gainers: unlock immediately if current rate is above the slow gainer threshold
+          const currentRate = computeGainPerActiveMember(clan);
+          const showsRecovery = currentRate > medianGainRate * ANALYSIS_CONFIG.SLOW_GAINER_THRESHOLD;
+
+          const shouldUnlock = cooldownExpired || showsRecovery;
+
+          if (!shouldUnlock) {
+            const retainedLockObj = {
+              lastDetectedTime,
+              lastDetectedIndex,
+              attackers: lastAttackers,
+              bleedScore: lastScore,
+              bleedReason: lastReason,
+            };
+            if (!viewHistoryMode) {
+              newBleedingLocks.set(clan.id, retainedLockObj);
+            }
+            return {
+              ...clan,
+              ...thresholdFields,
+              isBleeding: true,
+              bleedAttackers: lastAttackers,
+              bleedScore: lastScore,
+              bleedReason: lastReason,
+            };
+          }
         }
+
         return {
           ...clan,
           ...thresholdFields,
@@ -1555,36 +1610,68 @@ function App() {
 
       if (scoreData) {
         // Actively detected as bleeding this tick — lock it in
-        newBleedingLockIds.add(clan.id);
+        const lockObj = {
+          lastDetectedTime: Date.now(),
+          lastDetectedIndex: activeSnapshots.length - 1,
+          attackers: scoreData.attackers,
+          bleedScore: Math.min(100, scoreData.rawScore),
+          bleedReason: scoreData.reasons.join(' | ') || 'Stagnant target',
+        };
+        if (!viewHistoryMode) {
+          newBleedingLocks.set(clan.id, lockObj);
+        }
         return {
           ...clan,
           ...thresholdFields,
           isBleeding: true,
           bleedAttackers: scoreData.attackers,
-          bleedScore: Math.min(100, scoreData.rawScore),
-          bleedReason: scoreData.reasons.join(' | ') || 'Stable',
+          bleedScore: lockObj.bleedScore,
+          bleedReason: lockObj.bleedReason,
         };
       }
 
       if (wasBleedingLocked) {
         // Was bleeding before but not detected this tick.
         // Keep it locked as bleeding UNLESS the clan shows strong recovery
-        // across the entire reset (sustained positive activity + cumulative gain).
-        const hasRecovered = clan.normalizedActivity >= 0.2 && clan.gain > 0;
+        // OR the cooldown has expired.
+        const lockInfo = activeBleedingLocks.current.get(clan.id);
+        const lastDetectedTime = lockInfo && typeof lockInfo === 'object' ? lockInfo.lastDetectedTime : Date.now();
+        const lastDetectedIndex = lockInfo && typeof lockInfo === 'object' ? lockInfo.lastDetectedIndex : activeSnapshots.length - 1;
+        const lastAttackers = lockInfo && typeof lockInfo === 'object' ? lockInfo.attackers : [];
+        const lastScore = lockInfo && typeof lockInfo === 'object' ? lockInfo.bleedScore : 50;
+        const lastReason = lockInfo && typeof lockInfo === 'object' ? lockInfo.bleedReason : 'Locked — sustained stagnancy across reset';
 
-        if (!hasRecovered) {
-          // Still locked — keep showing as bleeding with a fading score
-          newBleedingLockIds.add(clan.id);
+        const secondsElapsed = (Date.now() - lastDetectedTime) / 1000;
+        const ticksElapsed = activeSnapshots.length - 1 - lastDetectedIndex;
+
+        const cooldownExpired = secondsElapsed >= ANALYSIS_CONFIG.BLEED_PERSISTENCE_DURATION &&
+                                ticksElapsed >= ANALYSIS_CONFIG.BLEED_PERSISTENCE_TICKS;
+        
+        // Stagnant clan recovers if it has tick gain AND normalized activity is positive
+        const showsRecovery = clan.tickGain > 0 && clan.normalizedActivity >= 0.2;
+
+        const shouldUnlock = cooldownExpired || showsRecovery;
+
+        if (!shouldUnlock) {
+          const retainedLockObj = {
+            lastDetectedTime,
+            lastDetectedIndex,
+            attackers: lastAttackers,
+            bleedScore: lastScore,
+            bleedReason: lastReason,
+          };
+          if (!viewHistoryMode) {
+            newBleedingLocks.set(clan.id, retainedLockObj);
+          }
           return {
             ...clan,
             ...thresholdFields,
             isBleeding: true,
-            bleedAttackers: [],
-            bleedScore: Math.max(10, Math.min(100, Math.round(30 + Math.abs(clan.normalizedActivity) * 40))),
-            bleedReason: 'Locked — sustained stagnancy across reset',
+            bleedAttackers: lastAttackers,
+            bleedScore: lastScore,
+            bleedReason: lastReason,
           };
         }
-        // Recovered — unlock
       }
 
       return {
@@ -1599,7 +1686,7 @@ function App() {
 
     // Update bleedingLocks ref with the new set (only if not in history mode)
     if (!viewHistoryMode) {
-      bleedingLocks.current = new Map([...newBleedingLockIds].map(id => [id, true]));
+      bleedingLocks.current = newBleedingLocks;
     }
 
     return results;

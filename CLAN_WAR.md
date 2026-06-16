@@ -63,6 +63,8 @@ When a gaining clan is detected, the tracker analyzes **per-member reputation ga
 4. Select the bracket that gives the most reasonable battle count (targeting ~5 wins per member per tick).
 5. If member data isn't available, fall back to estimating from total clan gain with ~40% active members.
 
+* **Yield Bracket Caching**: To prevent flickering when an attacker clan temporarily has a snapshot with 0 gain (making it impossible to calculate members' tick gains), the tracker **caches and reuses** the last successfully inferred yield bracket for each attacker in the current reset period.
+
 ### Step 3: Compute the Target Rep Range
 
 The inferred yield bracket maps to a percentage range of the **target clan's rep relative to the attacker's rep**:
@@ -198,12 +200,15 @@ If an attacker has a **clear primary victim** (its velocity is significantly low
 
 This prevents marking 8 clans as bleeding when only 1–2 are the actual victims.
 
-### Bleed Hysteresis (Persistence)
+### Bleed Hysteresis (Persistence & Cooldown)
 
-Once a clan is identified as bleeding, it **stays locked** as bleeding until it shows strong recovery:
-* **Recovery required**: `normalizedActivity ≥ 0.2` AND `cumulative gain > 0` across the reset period.
-* A single good tick does NOT remove a clan from bleeding status.
-* All locks reset at the 30-minute boundary.
+Once a clan is identified as bleeding, it **stays locked** as bleeding to prevent status flickering during short-term attacker inactivity or burst polling:
+* **Persistence Cooldown**: When a bleeding clan is no longer actively targeted, it remains locked as bleeding for a minimum of **30 seconds** (`BLEED_PERSISTENCE_DURATION`) and **5 snapshots/ticks** (`BLEED_PERSISTENCE_TICKS`).
+* **Attacker & Score Retention**: While locked in the cooldown period, the target **retains its last active attackers, its bleed score, and its bleed reason** rather than showing empty attackers or immediately fading.
+* **Immediate Recovery (Override)**: A target will unlock immediately, overriding the cooldown, if:
+  * For stagnant clans: they show positive tick gain and normalized activity recovers (`normalizedActivity >= 0.2`).
+  * For slow-gainer clans: their gain rate per active member rises back above the slow gainer threshold.
+* All locks and history cache clear at the 30-minute boundary.
 
 ### Score Interpretation
 

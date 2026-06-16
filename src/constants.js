@@ -68,4 +68,10 @@ export const ANALYSIS_CONFIG = {
   // Lower than the 100-point ceiling for stagnant bleed candidates because
   // the signal is inherently weaker when the clan IS still gaining.
   SLOW_GAINER_MAX_SCORE: 60,
+
+  // ── Bleeding status persistence ──
+  // A clan marked as bleeding remains locked as bleeding for at least this long
+  // to prevent flickering during 1s/5s polling when attackers temporarily pause.
+  BLEED_PERSISTENCE_DURATION: 30, // minimum seconds to persist bleeding status
+  BLEED_PERSISTENCE_TICKS: 10,     // minimum snapshots/ticks to persist bleeding status
 };
