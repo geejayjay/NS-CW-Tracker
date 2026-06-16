@@ -74,4 +74,10 @@ export const ANALYSIS_CONFIG = {
   // to prevent flickering during 1s/5s polling when attackers temporarily pause.
   BLEED_PERSISTENCE_DURATION: 30, // minimum seconds to persist bleeding status
   BLEED_PERSISTENCE_TICKS: 10,     // minimum snapshots/ticks to persist bleeding status
+
+  // ── Bleeding target narrowing and thresholding ──
+  MIN_BLEED_SCORE: 50,             // minimum score to qualify as bleeding
+  VELOCITY_TIE_MARGIN: 10,         // velocity margin (rep/tick) to consider stagnant targets tied
+  SLOW_GAINER_TIE_MARGIN: 0.1,     // percentage margin (10%) to consider slow gainers tied
 };
+

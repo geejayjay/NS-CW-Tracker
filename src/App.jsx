@@ -1073,8 +1073,8 @@ function App() {
       const bracket = inferYieldBracket(attacker);
       const range = computeTargetRepRange(attacker.reputation, bracket);
 
-      // Find non-gaining clans whose rep falls in the inferred target range
-      const matchingClans = leaderboardAnalysis
+      // Find non-gaining clans in target range
+      const stagnantInRange = leaderboardAnalysis
         .filter(c => {
           if (gainingClanIds.has(c.id)) return false;
           return c.reputation >= range.minRep && c.reputation <= range.maxRep;
@@ -1087,12 +1087,21 @@ function App() {
           reputation: c.reputation,
           rank: c.rank,
         }))
-        .sort((a, b) => a.velocity - b.velocity); // lowest velocity first = most likely victim
+        .sort((a, b) => a.velocity - b.velocity); // lowest velocity first
+
+      // Narrow down to best stagnant targets: lowest velocity + tie margin
+      let bestMatchingClans = [];
+      if (stagnantInRange.length > 0) {
+        const lowestVelocity = stagnantInRange[0].velocity;
+        bestMatchingClans = stagnantInRange.filter(
+          c => c.velocity <= lowestVelocity + ANALYSIS_CONFIG.VELOCITY_TIE_MARGIN
+        );
+      }
 
       attackerTargetMap.set(attacker.id, {
         bracket,
         range,
-        matchingClans,
+        matchingClans: bestMatchingClans, // only keep the best/tied candidate(s)
         attackerName: attacker.name,
         attackerRep: attacker.reputation,
         attackerGain: attacker.gain,
@@ -1103,11 +1112,6 @@ function App() {
     // Detects gaining clans that are likely being bled while also farming.
     // Key insight: if most clans in a yield range gain at +6 rate but one
     // only gains at +3 rate, the slow one is probably being bled.
-    //
-    // Algorithm:
-    //   1. Compute gain-per-active-member for each gaining clan
-    //   2. For each attacker, find OTHER gaining clans in its target range
-    //   3. Compare their gain rate to the median — flag outlier slow gainers
     const slowGainerCandidates = new Map(); // clanId → { gainRate, medianRate, attackers[] }
 
     // Helper: estimate gain per active member for a clan
@@ -1154,7 +1158,7 @@ function App() {
       : 1;
 
     // For each attacker, check if any OTHER gaining clans fall in its target range
-    // and have a significantly lower gain rate
+    // and have a significantly lower gain rate. Pick only the slowest slow-gaining target(s).
     if (activelyGainingClans.length >= 2) {
       attackerTargetMap.forEach((data, attackerId) => {
         const { range, bracket, attackerName } = data;
@@ -1167,28 +1171,43 @@ function App() {
 
         if (gainingInRange.length === 0) return;
 
-        gainingInRange.forEach(candidate => {
-          const candidateRate = gainingClanRates.get(candidate.id) || 0;
+        // Compute rates and filter by threshold
+        const slowGainers = gainingInRange
+          .map(c => ({
+            clan: c,
+            rate: gainingClanRates.get(c.id) || 0,
+          }))
+          .filter(item => item.rate > 0 && item.rate <= medianGainRate * ANALYSIS_CONFIG.SLOW_GAINER_THRESHOLD)
+          .sort((a, b) => a.rate - b.rate); // slowest rate first
 
-          // Flag if gain rate is ≤ threshold × median
-          if (candidateRate > 0 && candidateRate <= medianGainRate * ANALYSIS_CONFIG.SLOW_GAINER_THRESHOLD) {
-            const existing = slowGainerCandidates.get(candidate.id);
-            const attackerInfo = {
-              attackerId,
-              attackerName,
-              bracket,
-            };
+        if (slowGainers.length === 0) return;
 
-            if (existing) {
-              existing.attackers.push(attackerInfo);
-            } else {
-              slowGainerCandidates.set(candidate.id, {
-                gainRate: candidateRate,
-                medianRate: medianGainRate,
-                ratio: candidateRate / medianGainRate,
-                attackers: [attackerInfo],
-              });
-            }
+        // Keep only the slowest + tie margin
+        const slowestRate = slowGainers[0].rate;
+        const bestSlowGainers = slowGainers.filter(
+          item => item.rate <= slowestRate * (1 + ANALYSIS_CONFIG.SLOW_GAINER_TIE_MARGIN)
+        );
+
+        bestSlowGainers.forEach(item => {
+          const candidate = item.clan;
+          const candidateRate = item.rate;
+          
+          const existing = slowGainerCandidates.get(candidate.id);
+          const attackerInfo = {
+            attackerId,
+            attackerName,
+            bracket,
+          };
+
+          if (existing) {
+            existing.attackers.push(attackerInfo);
+          } else {
+            slowGainerCandidates.set(candidate.id, {
+              gainRate: candidateRate,
+              medianRate: medianGainRate,
+              ratio: candidateRate / medianGainRate,
+              attackers: [attackerInfo],
+            });
           }
         });
       });
@@ -1385,7 +1404,7 @@ function App() {
 
         // Check if this gaining clan is a slow-gainer bleed candidate
         const scoreData = clanRawScores.get(clan.id);
-        if (scoreData) {
+        if (scoreData && scoreData.rawScore >= ANALYSIS_CONFIG.MIN_BLEED_SCORE) {
           const mappedAttackers = scoreData.attackers.map(a => {
             const aData = attackerTargetMap.get(a.id);
             return {
@@ -1484,7 +1503,7 @@ function App() {
       const scoreData = clanRawScores.get(clan.id);
       const wasBleedingLocked = activeBleedingLocks.current.has(clan.id);
 
-      if (scoreData) {
+      if (scoreData && scoreData.rawScore >= ANALYSIS_CONFIG.MIN_BLEED_SCORE) {
         const mappedAttackers = scoreData.attackers.map(a => {
           const aData = attackerTargetMap.get(a.id);
           return {
