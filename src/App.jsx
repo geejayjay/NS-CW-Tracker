@@ -37,6 +37,79 @@ const IconAlertTriangle = ({ className }) => (
 const IconInfo = ({ className, style }) => (
   <svg className={className} style={style} xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
 );
+const RepRangeTooltip = ({ baseRep, activeYield, targetRep = null, title = "Yield Brackets", subtitle = "" }) => {
+  return (
+    <div className="tooltip-card" style={{ width: '320px', padding: '0.85rem' }}>
+      <div style={{ fontWeight: 'bold', marginBottom: '0.4rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.2rem', color: 'var(--color-water)', fontFamily: 'var(--font-gaming)', fontSize: '0.8rem' }}>
+        {title}
+      </div>
+      {subtitle && (
+        <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginBottom: '0.6rem' }}>
+          {subtitle}
+        </div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+        {YIELD_BRACKETS.map(b => {
+          const minRep = b.minPercent === -Infinity ? 0 : Math.floor(baseRep * (1 + b.minPercent / 100));
+          const maxRep = b.maxPercent === Infinity ? Infinity : Math.ceil(baseRep * (1 + b.maxPercent / 100));
+          
+          let isCurrent = false;
+          if (targetRep !== null) {
+            isCurrent = targetRep >= minRep && targetRep <= maxRep;
+          } else if (activeYield !== null) {
+            isCurrent = b.yield === activeYield;
+          }
+
+          let badgeClass = 'badge-secondary';
+          if (b.yield === 15) badgeClass = 'badge-fire text-glow-fire';
+          else if (b.yield === 10) badgeClass = 'badge-earth text-glow-earth';
+          else if (b.yield === 6) badgeClass = 'badge-water text-glow-water';
+          else if (b.yield === 3) badgeClass = 'badge-lightning text-glow-lightning';
+
+          const rangeText = b.minPercent === -Infinity 
+            ? `< ${maxRep.toLocaleString()}`
+            : b.maxPercent === Infinity
+            ? `> ${minRep.toLocaleString()}`
+            : `${minRep.toLocaleString()} - ${maxRep.toLocaleString()}`;
+
+          return (
+            <div 
+              key={b.yield} 
+              style={{ 
+                display: 'flex', 
+                justifyContent: 'space-between', 
+                alignItems: 'center', 
+                fontSize: '0.75rem', 
+                padding: '0.3rem 0.5rem', 
+                borderRadius: '4px',
+                background: isCurrent ? 'rgba(6, 182, 212, 0.08)' : 'transparent',
+                border: isCurrent ? '1px solid rgba(6, 182, 212, 0.3)' : '1px solid transparent',
+                color: isCurrent ? 'var(--text-primary)' : 'var(--text-secondary)',
+                fontWeight: isCurrent ? 'bold' : 'normal'
+              }}
+            >
+              <span className={`badge ${badgeClass}`} style={{ fontSize: '0.65rem', padding: '0.1rem 0.3rem', minWidth: '42px' }}>
+                +{b.yield} rep
+              </span>
+              <span className="text-number" style={{ fontSize: '0.75rem' }}>
+                {rangeText}
+              </span>
+              {isCurrent && targetRep !== null && (
+                <span style={{ fontSize: '0.6rem', color: 'var(--color-water)', marginLeft: '0.25rem' }}>🎯</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {targetRep !== null && (
+        <div style={{ borderTop: '1px solid var(--border-color)', marginTop: '0.5rem', paddingTop: '0.4rem', fontSize: '0.7rem', display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)' }}>
+          <span>Current Reputation:</span>
+          <strong className="text-number" style={{ color: 'var(--text-primary)' }}>{targetRep.toLocaleString()}</strong>
+        </div>
+      )}
+    </div>
+  );
+};
 
 function App() {
   // Config States
@@ -437,227 +510,6 @@ function App() {
   };
   latestActualReset.current = endGracePeriodAndReset;
 
-  // Polling, Countdown & Clock Boundary Reset Effect
-  // Uses a Web Worker so timers keep running accurately even when the tab is
-  // backgrounded (alt-tabbed). Browsers throttle main-thread setInterval in
-  // inactive tabs, but Worker timers are exempt from this throttling.
-  useEffect(() => {
-    if (!rankings) return;
-
-    const worker = new Worker(new URL('./timerWorker.js', import.meta.url), { type: 'module' });
-
-    worker.onmessage = () => {
-      const now = new Date();
-      const m = now.getMinutes();
-      const s = now.getSeconds();
-
-      // Calculate time remaining until next xx:00 or xx:30
-      const targetMin = m < 30 ? 30 : 60;
-      const diffSeconds = (targetMin - m) * 60 - s;
-      const minRemain = Math.floor(diffSeconds / 60);
-      const secRemain = diffSeconds % 60;
-      
-      setBleedResetCountdown(`${minRemain}m ${secRemain.toString().padStart(2, '0')}s`);
-      setIsNearReset(diffSeconds <= 180); // <= 3 minutes left
-
-      // Check boundary transition
-      const currentBoundaryKey = `${now.getHours()}:${m < 30 ? '00' : '30'}`;
-      if (lastResetBoundary && lastResetBoundary !== currentBoundaryKey) {
-        // Clock crossed the boundary! Set last boundary key.
-        setLastResetBoundary(currentBoundaryKey);
-        
-        // Start 20s grace period
-        setInResetGracePeriod(true);
-        setResetGraceCountdown(20);
-
-        // Save current state as history BEFORE we wipe it
-        const currentSnaps = latestSnapshotsRef.current;
-        const currentRanks = latestRankingsRef.current;
-        if (currentSnaps && currentSnaps.length > 0 && currentRanks) {
-          setLastResetSnapshots(currentSnaps);
-          setLastResetRankings(currentRanks);
-          localStorage.setItem('ns_cw_last_reset_snapshots', JSON.stringify(currentSnaps));
-          localStorage.setItem('ns_cw_last_reset_rankings', JSON.stringify(currentRanks));
-          
-          // Capture current locks and bracket cache for history
-          lastResetGainingLocks.current = new Map(gainingLocks.current);
-          lastResetBleedingLocks.current = new Map(bleedingLocks.current);
-          lastResetAttackerBrackets.current = new Map(attackerBrackets.current);
-          localStorage.setItem('ns_cw_last_reset_gaining_locks', JSON.stringify([...gainingLocks.current.keys()]));
-          localStorage.setItem('ns_cw_last_reset_bleeding_locks', JSON.stringify([...bleedingLocks.current.entries()]));
-          localStorage.setItem('ns_cw_last_reset_attacker_brackets', JSON.stringify([...attackerBrackets.current.entries()]));
-        }
-      }
-
-      // Calculate Clan War End countdown dynamically
-      let cwCountdownText = 'ENDED';
-      try {
-        let offsetMinutes = 0;
-        const match = cwTimezone.match(/^([+-])(\d{2}):(\d{2})$/);
-        if (match) {
-          const sign = match[1] === '+' ? 1 : -1;
-          const hours = parseInt(match[2], 10);
-          const minutes = parseInt(match[3], 10);
-          offsetMinutes = sign * (hours * 60 + minutes);
-        }
-
-        const constructTargetDate = (year, month) => {
-          const utcMidnight = Date.UTC(year, month, cwEndDay, 0, 0, 0);
-          return new Date(utcMidnight - (offsetMinutes * 60 * 1000));
-        };
-
-        let targetDate = constructTargetDate(now.getFullYear(), now.getMonth());
-
-        // Rollover to next month if already passed
-        if (targetDate.getTime() <= now.getTime()) {
-          let nextMonth = now.getMonth() + 1;
-          let nextYear = now.getFullYear();
-          if (nextMonth > 11) {
-            nextMonth = 0;
-            nextYear += 1;
-          }
-          targetDate = constructTargetDate(nextYear, nextMonth);
-        }
-
-        const diffMs = targetDate.getTime() - now.getTime();
-        if (diffMs > 0) {
-          const diffSecs = Math.floor(diffMs / 1000);
-          const days = Math.floor(diffSecs / 86400);
-          const hours = Math.floor((diffSecs % 86400) / 3600);
-          const mins = Math.floor((diffSecs % 3600) / 60);
-          
-          cwCountdownText = `${days.toString().padStart(2, '0')} Days : ${hours.toString().padStart(2, '0')} Hours : ${mins.toString().padStart(2, '0')} Min`;
-        }
-      } catch (err) {
-        cwCountdownText = 'INVALID DATE';
-      }
-      setCwCountdown(cwCountdownText);
-
-      // Handle Reset Grace Period Countdown
-      let inGrace = false;
-      setResetGraceCountdown(prev => {
-        if (prev > 1) {
-          inGrace = true;
-          return prev - 1;
-        } else if (prev === 1) {
-          // Grace period finished! Trigger reset and fresh poll
-          latestActualReset.current();
-          return 0;
-        }
-        return 0;
-      });
-
-      // Decrement Auto-Poll Countdown
-      if (isAutoPolling) {
-        setHighSpeedTicksRemaining(prev => Math.max(0, prev - 1));
-        setTimeToNextPoll(prev => {
-          if (prev <= 1) {
-            // Only trigger auto-poll if we are not in the grace period
-            if (!latestInResetGracePeriod.current && !inGrace) {
-              triggerAutoPoll();
-            }
-            return pollingInterval;
-          }
-          return prev - 1;
-        });
-      }
-    };
-
-    worker.postMessage('start');
-
-    return () => {
-      worker.postMessage('stop');
-      worker.terminate();
-    };
-  }, [isAutoPolling, rankings, pollingInterval, lastResetBoundary, cwEndDay, cwTimezone]);
-
-  // Adaptive Polling rate trigger on rankings updates and bleed detection
-  useEffect(() => {
-    if (!rankings || snapshots.length < 2) return;
-
-    // 1. Check if our target clan is gaining reputation
-    const currentClan = rankings.clans.find(c => c.id === targetClanId);
-    const prevSnapshot = snapshots[snapshots.length - 2];
-    const prevClan = prevSnapshot ? prevSnapshot.clans.find(c => c.id === targetClanId) : null;
-
-    let desiredInterval = 60; // standard 60 seconds
-    let isGaining = false;
-
-    if (currentClan && prevClan) {
-      const gain = currentClan.reputation - prevClan.reputation;
-      if (gain > 0) {
-        isGaining = true;
-      }
-    }
-
-    // 2. Check for NEW bleeding clans using the stable bleedAnalysis results
-    const latestSnapshot = snapshots[snapshots.length - 1];
-    const currBleedingIds = bleedAnalysis.filter(c => c.isBleeding).map(c => c.id);
-    const prevBleedingIds = prevBleedingIdsRef.current || [];
-    
-    // Find if any clan is bleeding now but was not in the previous tick
-    const newBleeds = currBleedingIds.filter(id => !prevBleedingIds.includes(id));
-    
-    // Update ref for next tick
-    prevBleedingIdsRef.current = currBleedingIds;
-
-    if (newBleeds.length > 0) {
-      // New bleeding clan detected! 1s burst for 5 ticks to capture per-member
-      // rep changes (needed for yield bracket inference). After that, the
-      // hysteresis + weighted analysis has enough data and we slow down.
-      setHighSpeedTicksRemaining(5);
-      desiredInterval = 1;
-    } else if (highSpeedTicksRemaining > 0) {
-      // Still in the 1s member-data capture burst
-      desiredInterval = 1;
-    } else if (isGaining || currBleedingIds.length > 0) {
-      // Active scenario (gaining or established bleeds) — 5s monitoring
-      // is fast enough to track changes without hammering the API
-      desiredInterval = 5;
-    } else {
-      // Standby — nothing happening, check every 60s
-      desiredInterval = 60;
-    }
-
-    if (pollingInterval !== desiredInterval) {
-      setPollingInterval(desiredInterval);
-      setTimeToNextPoll(desiredInterval);
-    }
-
-    // Trigger sounds and push notifications (once per reset boundary)
-    // Each sound type fires at most once per 30-min reset cycle.
-    // The flags are cleared in handleTimeReset when the boundary crosses.
-    if (latestSnapshot && latestSnapshot.generated_at !== lastNotifiedTime) {
-      setLastNotifiedTime(latestSnapshot.generated_at);
-
-      if (isGaining && notifyGaining && !soundFiredThisReset.current.gain) {
-        soundFiredThisReset.current.gain = true;
-        if (enableSound) playNotificationSound('gain');
-        if (enableNotifications) {
-          triggerPushNotification(
-            "⚔️ Clan Rep Gained!",
-            `Your clan (${currentClan?.name || 'Tracked'}) has gained reputation since the last update!`
-          );
-        }
-      }
-
-      if (newBleeds.length > 0 && notifyBleeding && !soundFiredThisReset.current.bleed) {
-        soundFiredThisReset.current.bleed = true;
-        const bleedingClansNames = newBleeds.map(id => {
-          const c = latestSnapshot.clans.find(clan => clan.id === id);
-          return c ? `${c.name} (#${c.rank})` : `ID ${id}`;
-        }).join(', ');
-
-        if (enableSound) playNotificationSound('bleed');
-        if (enableNotifications) {
-          triggerPushNotification(
-            "🔴 New Bleeding Targets Detected!",
-            `Possible bleeding target(s): ${bleedingClansNames}`
-          );
-        }
-      }
-    }
-  }, [rankings, targetClanId, snapshots, highSpeedTicksRemaining, pollingInterval, lastNotifiedTime, enableSound, enableNotifications, notifyGaining, notifyBleeding, bleedAnalysis]);
 
   const triggerAutoPoll = () => {
     if (simulationMode) {
@@ -1526,14 +1378,29 @@ function App() {
       const thresholdFields = computeThresholdFields(clan);
 
       if (gainingClanIds.has(clan.id)) {
+        const attackerData = attackerTargetMap.get(clan.id);
+        const inferredYield = attackerData?.bracket?.yield;
+        const inferredRange = attackerData?.range;
+        const inferredBracketLabel = attackerData?.bracket?.label;
+
         // Check if this gaining clan is a slow-gainer bleed candidate
         const scoreData = clanRawScores.get(clan.id);
         if (scoreData) {
+          const mappedAttackers = scoreData.attackers.map(a => {
+            const aData = attackerTargetMap.get(a.id);
+            return {
+              ...a,
+              inferredYield: aData?.bracket?.yield,
+              inferredRange: aData?.range,
+              inferredBracketLabel: aData?.bracket?.label,
+            };
+          });
+
           // Slow-gainer: gaining but likely being bled
           const lockObj = {
             lastDetectedTime: Date.now(),
             lastDetectedIndex: activeSnapshots.length - 1,
-            attackers: scoreData.attackers,
+            attackers: mappedAttackers,
             bleedScore: Math.min(ANALYSIS_CONFIG.SLOW_GAINER_MAX_SCORE, scoreData.rawScore),
             bleedReason: scoreData.reasons.join(' | ') || '🐌 Slow gainer — possible bleed-while-gaining',
           };
@@ -1543,8 +1410,11 @@ function App() {
           return {
             ...clan,
             ...thresholdFields,
+            inferredYield,
+            inferredRange,
+            inferredBracketLabel,
             isBleeding: true,
-            bleedAttackers: scoreData.attackers,
+            bleedAttackers: mappedAttackers,
             bleedScore: lockObj.bleedScore,
             bleedReason: lockObj.bleedReason,
           };
@@ -1587,6 +1457,9 @@ function App() {
             return {
               ...clan,
               ...thresholdFields,
+              inferredYield,
+              inferredRange,
+              inferredBracketLabel,
               isBleeding: true,
               bleedAttackers: lastAttackers,
               bleedScore: lastScore,
@@ -1598,6 +1471,9 @@ function App() {
         return {
           ...clan,
           ...thresholdFields,
+          inferredYield,
+          inferredRange,
+          inferredBracketLabel,
           isBleeding: false,
           bleedAttackers: [],
           bleedScore: 0,
@@ -1609,11 +1485,21 @@ function App() {
       const wasBleedingLocked = activeBleedingLocks.current.has(clan.id);
 
       if (scoreData) {
+        const mappedAttackers = scoreData.attackers.map(a => {
+          const aData = attackerTargetMap.get(a.id);
+          return {
+            ...a,
+            inferredYield: aData?.bracket?.yield,
+            inferredRange: aData?.range,
+            inferredBracketLabel: aData?.bracket?.label,
+          };
+        });
+
         // Actively detected as bleeding this tick — lock it in
         const lockObj = {
           lastDetectedTime: Date.now(),
           lastDetectedIndex: activeSnapshots.length - 1,
-          attackers: scoreData.attackers,
+          attackers: mappedAttackers,
           bleedScore: Math.min(100, scoreData.rawScore),
           bleedReason: scoreData.reasons.join(' | ') || 'Stagnant target',
         };
@@ -1624,7 +1510,7 @@ function App() {
           ...clan,
           ...thresholdFields,
           isBleeding: true,
-          bleedAttackers: scoreData.attackers,
+          bleedAttackers: mappedAttackers,
           bleedScore: lockObj.bleedScore,
           bleedReason: lockObj.bleedReason,
         };
@@ -1691,6 +1577,228 @@ function App() {
 
     return results;
   }, [leaderboardAnalysis, activelyGainingClans, targetClanData, activeSnapshots, viewHistoryMode]);
+
+  // Polling, Countdown & Clock Boundary Reset Effect
+  // Uses a Web Worker so timers keep running accurately even when the tab is
+  // backgrounded (alt-tabbed). Browsers throttle main-thread setInterval in
+  // inactive tabs, but Worker timers are exempt from this throttling.
+  useEffect(() => {
+    if (!rankings) return;
+
+    const worker = new Worker(new URL('./timerWorker.js', import.meta.url), { type: 'module' });
+
+    worker.onmessage = () => {
+      const now = new Date();
+      const m = now.getMinutes();
+      const s = now.getSeconds();
+
+      // Calculate time remaining until next xx:00 or xx:30
+      const targetMin = m < 30 ? 30 : 60;
+      const diffSeconds = (targetMin - m) * 60 - s;
+      const minRemain = Math.floor(diffSeconds / 60);
+      const secRemain = diffSeconds % 60;
+      
+      setBleedResetCountdown(`${minRemain}m ${secRemain.toString().padStart(2, '0')}s`);
+      setIsNearReset(diffSeconds <= 180); // <= 3 minutes left
+
+      // Check boundary transition
+      const currentBoundaryKey = `${now.getHours()}:${m < 30 ? '00' : '30'}`;
+      if (lastResetBoundary && lastResetBoundary !== currentBoundaryKey) {
+        // Clock crossed the boundary! Set last boundary key.
+        setLastResetBoundary(currentBoundaryKey);
+        
+        // Start 20s grace period
+        setInResetGracePeriod(true);
+        setResetGraceCountdown(20);
+
+        // Save current state as history BEFORE we wipe it
+        const currentSnaps = latestSnapshotsRef.current;
+        const currentRanks = latestRankingsRef.current;
+        if (currentSnaps && currentSnaps.length > 0 && currentRanks) {
+          setLastResetSnapshots(currentSnaps);
+          setLastResetRankings(currentRanks);
+          localStorage.setItem('ns_cw_last_reset_snapshots', JSON.stringify(currentSnaps));
+          localStorage.setItem('ns_cw_last_reset_rankings', JSON.stringify(currentRanks));
+          
+          // Capture current locks and bracket cache for history
+          lastResetGainingLocks.current = new Map(gainingLocks.current);
+          lastResetBleedingLocks.current = new Map(bleedingLocks.current);
+          lastResetAttackerBrackets.current = new Map(attackerBrackets.current);
+          localStorage.setItem('ns_cw_last_reset_gaining_locks', JSON.stringify([...gainingLocks.current.keys()]));
+          localStorage.setItem('ns_cw_last_reset_bleeding_locks', JSON.stringify([...bleedingLocks.current.entries()]));
+          localStorage.setItem('ns_cw_last_reset_attacker_brackets', JSON.stringify([...attackerBrackets.current.entries()]));
+        }
+      }
+
+      // Calculate Clan War End countdown dynamically
+      let cwCountdownText = 'ENDED';
+      try {
+        let offsetMinutes = 0;
+        const match = cwTimezone.match(/^([+-])(\d{2}):(\d{2})$/);
+        if (match) {
+          const sign = match[1] === '+' ? 1 : -1;
+          const hours = parseInt(match[2], 10);
+          const minutes = parseInt(match[3], 10);
+          offsetMinutes = sign * (hours * 60 + minutes);
+        }
+
+        const constructTargetDate = (year, month) => {
+          const utcMidnight = Date.UTC(year, month, cwEndDay, 0, 0, 0);
+          return new Date(utcMidnight - (offsetMinutes * 60 * 1000));
+        };
+
+        let targetDate = constructTargetDate(now.getFullYear(), now.getMonth());
+
+        // Rollover to next month if already passed
+        if (targetDate.getTime() <= now.getTime()) {
+          let nextMonth = now.getMonth() + 1;
+          let nextYear = now.getFullYear();
+          if (nextMonth > 11) {
+            nextMonth = 0;
+            nextYear += 1;
+          }
+          targetDate = constructTargetDate(nextYear, nextMonth);
+        }
+
+        const diffMs = targetDate.getTime() - now.getTime();
+        if (diffMs > 0) {
+          const diffSecs = Math.floor(diffMs / 1000);
+          const days = Math.floor(diffSecs / 86400);
+          const hours = Math.floor((diffSecs % 86400) / 3600);
+          const mins = Math.floor((diffSecs % 3600) / 60);
+          
+          cwCountdownText = `${days.toString().padStart(2, '0')} Days : ${hours.toString().padStart(2, '0')} Hours : ${mins.toString().padStart(2, '0')} Min`;
+        }
+      } catch (err) {
+        cwCountdownText = 'INVALID DATE';
+      }
+      setCwCountdown(cwCountdownText);
+
+      // Handle Reset Grace Period Countdown
+      let inGrace = false;
+      setResetGraceCountdown(prev => {
+        if (prev > 1) {
+          inGrace = true;
+          return prev - 1;
+        } else if (prev === 1) {
+          // Grace period finished! Trigger reset and fresh poll
+          latestActualReset.current();
+          return 0;
+        }
+        return 0;
+      });
+
+      // Decrement Auto-Poll Countdown
+      if (isAutoPolling) {
+        setHighSpeedTicksRemaining(prev => Math.max(0, prev - 1));
+        setTimeToNextPoll(prev => {
+          if (prev <= 1) {
+            // Only trigger auto-poll if we are not in the grace period
+            if (!latestInResetGracePeriod.current && !inGrace) {
+              triggerAutoPoll();
+            }
+            return pollingInterval;
+          }
+          return prev - 1;
+        });
+      }
+    };
+
+    worker.postMessage('start');
+
+    return () => {
+      worker.postMessage('stop');
+      worker.terminate();
+    };
+  }, [isAutoPolling, rankings, pollingInterval, lastResetBoundary, cwEndDay, cwTimezone]);
+
+  // Adaptive Polling rate trigger on rankings updates and bleed detection
+  useEffect(() => {
+    if (!rankings || snapshots.length < 2) return;
+
+    // 1. Check if our target clan is gaining reputation
+    const currentClan = rankings.clans.find(c => c.id === targetClanId);
+    const prevSnapshot = snapshots[snapshots.length - 2];
+    const prevClan = prevSnapshot ? prevSnapshot.clans.find(c => c.id === targetClanId) : null;
+
+    let desiredInterval = 60; // standard 60 seconds
+    let isGaining = false;
+
+    if (currentClan && prevClan) {
+      const gain = currentClan.reputation - prevClan.reputation;
+      if (gain > 0) {
+        isGaining = true;
+      }
+    }
+
+    // 2. Check for NEW bleeding clans using the stable bleedAnalysis results
+    const latestSnapshot = snapshots[snapshots.length - 1];
+    const currBleedingIds = bleedAnalysis.filter(c => c.isBleeding).map(c => c.id);
+    const prevBleedingIds = prevBleedingIdsRef.current || [];
+    
+    // Find if any clan is bleeding now but was not in the previous tick
+    const newBleeds = currBleedingIds.filter(id => !prevBleedingIds.includes(id));
+    
+    // Update ref for next tick
+    prevBleedingIdsRef.current = currBleedingIds;
+
+    if (newBleeds.length > 0) {
+      // New bleeding clan detected! 1s burst for 5 ticks to capture per-member
+      // rep changes (needed for yield bracket inference). After that, the
+      // hysteresis + weighted analysis has enough data and we slow down.
+      setHighSpeedTicksRemaining(5);
+      desiredInterval = 1;
+    } else if (highSpeedTicksRemaining > 0) {
+      // Still in the 1s member-data capture burst
+      desiredInterval = 1;
+    } else if (isGaining || currBleedingIds.length > 0) {
+      // Active scenario (gaining or established bleeds) — 5s monitoring
+      // is fast enough to track changes without hammering the API
+      desiredInterval = 5;
+    } else {
+      // Standby — nothing happening, check every 60s
+      desiredInterval = 60;
+    }
+
+    if (pollingInterval !== desiredInterval) {
+      setPollingInterval(desiredInterval);
+      setTimeToNextPoll(desiredInterval);
+    }
+
+    // Trigger sounds and push notifications (once per reset boundary)
+    // Each sound type fires at most once per 30-min reset cycle.
+    // The flags are cleared in handleTimeReset when the boundary crosses.
+    if (latestSnapshot && latestSnapshot.generated_at !== lastNotifiedTime) {
+      setLastNotifiedTime(latestSnapshot.generated_at);
+
+      if (isGaining && notifyGaining && !soundFiredThisReset.current.gain) {
+        soundFiredThisReset.current.gain = true;
+        if (enableSound) playNotificationSound('gain');
+        if (enableNotifications) {
+          triggerPushNotification(
+            "⚔️ Clan Rep Gained!",
+            `Your clan (${currentClan?.name || 'Tracked'}) has gained reputation since the last update!`
+          );
+        }
+      }
+
+      if (newBleeds.length > 0 && notifyBleeding && !soundFiredThisReset.current.bleed) {
+        soundFiredThisReset.current.bleed = true;
+        const bleedingClansNames = newBleeds.map(id => {
+          const c = latestSnapshot.clans.find(clan => clan.id === id);
+          return c ? `${c.name} (#${c.rank})` : `ID ${id}`;
+        }).join(', ');
+
+        if (enableSound) playNotificationSound('bleed');
+        if (enableNotifications) {
+          triggerPushNotification(
+            "🔴 New Bleeding Targets Detected!",
+            `Possible bleeding target(s): ${bleedingClansNames}`
+          );
+        }
+      }
+    }
+  }, [rankings, targetClanId, snapshots, highSpeedTicksRemaining, pollingInterval, lastNotifiedTime, enableSound, enableNotifications, notifyGaining, notifyBleeding, bleedAnalysis]);
 
   // Filtered Leaderboard for the rankings view
   const filteredLeaderboard = useMemo(() => {
@@ -2466,8 +2574,17 @@ function App() {
                         {c.bleedAttackers && c.bleedAttackers.length > 0 && (
                           <div>
                             <strong>Likely Attackers:</strong>
-                            <div style={{ color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
-                              {c.bleedAttackers.map(a => `${a.name} (#${a.rank})`).join(', ')}
+                            <div style={{ color: 'var(--text-secondary)', marginTop: '0.15rem', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                              {c.bleedAttackers.map(a => {
+                                const rangeText = a.inferredRange 
+                                  ? `[Farming +${a.inferredYield} target in range ${Math.round(a.inferredRange.minRep).toLocaleString()} - ${a.inferredRange.maxRep === Infinity ? '∞' : Math.round(a.inferredRange.maxRep).toLocaleString()}]`
+                                  : '';
+                                return (
+                                  <div key={a.id} style={{ fontSize: '0.7rem' }}>
+                                    • {a.name} (#{a.rank}) {rangeText}
+                                  </div>
+                                );
+                              })}
                             </div>
                           </div>
                         )}
@@ -2484,8 +2601,25 @@ function App() {
                     >
                       {c.bleedScore}/100
                     </span>
-                    <span className={`badge ${c.bleedYield === 15 ? 'badge-fire' : c.bleedYield === 10 ? 'badge-earth' : c.bleedYield === 6 ? 'badge-water' : 'badge-secondary'}`} style={{ fontSize: '0.75rem' }}>
-                      +{c.bleedYield} yield
+                    <span className="bleed-info-tooltip">
+                      <span 
+                        className={`badge ${
+                          c.bleedYield === 15 ? 'badge-fire text-glow-fire' : 
+                          c.bleedYield === 10 ? 'badge-earth text-glow-earth' : 
+                          c.bleedYield === 6 ? 'badge-water text-glow-water' : 
+                          c.bleedYield === 3 ? 'badge-lightning text-glow-lightning' : 'badge-secondary'
+                        }`} 
+                        style={{ fontSize: '0.75rem', cursor: 'help', fontWeight: 'bold' }}
+                      >
+                        +{c.bleedYield} yield
+                      </span>
+                      <RepRangeTooltip 
+                        baseRep={targetClanData.current.reputation} 
+                        targetRep={c.reputation}
+                        activeYield={c.bleedYield}
+                        title={`⚔️ Yield Brackets relative to Your Clan`}
+                        subtitle={`Target: ${c.name} (#${c.rank})`}
+                      />
                     </span>
                   </div>
                 </div>
@@ -2894,8 +3028,17 @@ function App() {
                                   {c.bleedAttackers && c.bleedAttackers.length > 0 && (
                                     <div>
                                       <strong>Likely Attackers:</strong>
-                                      <div style={{ color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
-                                        {c.bleedAttackers.map(a => `${a.name} (#${a.rank})`).join(', ')}
+                                      <div style={{ color: 'var(--text-secondary)', marginTop: '0.15rem', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                                        {c.bleedAttackers.map(a => {
+                                          const rangeText = a.inferredRange 
+                                            ? `[Farming +${a.inferredYield} target in range ${Math.round(a.inferredRange.minRep).toLocaleString()} - ${a.inferredRange.maxRep === Infinity ? '∞' : Math.round(a.inferredRange.maxRep).toLocaleString()}]`
+                                            : '';
+                                          return (
+                                            <div key={a.id} style={{ fontSize: '0.7rem' }}>
+                                              • {a.name} (#{a.rank}) {rangeText}
+                                            </div>
+                                          );
+                                        })}
                                       </div>
                                     </div>
                                   )}
@@ -2903,10 +3046,32 @@ function App() {
                               </span>
                             </span>
                           ) : (
-                            <span style={{ color: 'var(--color-wind)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
-                              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-wind)', display: 'inline-block' }}></span>
-                              Active
-                            </span>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                              <span style={{ color: 'var(--color-wind)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-wind)', display: 'inline-block' }}></span>
+                                Active
+                              </span>
+                              {c.inferredYield && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                  <span className="bleed-info-tooltip">
+                                    <span style={{ textDecoration: 'underline dotted var(--text-muted)', cursor: 'help' }}>
+                                      ⚔️ Farming (+{c.inferredYield})
+                                    </span>
+                                    <RepRangeTooltip 
+                                      baseRep={c.reputation} 
+                                      activeYield={c.inferredYield} 
+                                      title={`⚔️ Farming Brackets: ${c.name}`}
+                                      subtitle={`Inferred yield (+${c.inferredYield}) based on reputation velocity.`}
+                                    />
+                                  </span>
+                                </div>
+                              )}
+                              {c.inferredRange && (
+                                <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                                  Range: {Math.round(c.inferredRange.minRep).toLocaleString()} - {c.inferredRange.maxRep === Infinity ? '∞' : Math.round(c.inferredRange.maxRep).toLocaleString()}
+                                </span>
+                              )}
+                            </div>
                           )}
                         </td>
                         <td className="hide-mobile">
@@ -2935,16 +3100,25 @@ function App() {
                         <td style={{ textAlign: 'right' }}>
                           {c.isBleeding ? (
                             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.2rem' }}>
-                              <span 
-                                className={`badge ${
-                                  c.bleedYield === 15 ? 'badge-fire text-glow-fire' : 
-                                  c.bleedYield === 10 ? 'badge-earth text-glow-earth' : 
-                                  c.bleedYield === 6 ? 'badge-water text-glow-water' : 
-                                  c.bleedYield === 3 ? 'badge-lightning text-glow-lightning' : 'badge-secondary'
-                                }`} 
-                                style={{ fontWeight: 'bold', fontSize: '0.85rem' }}
-                              >
-                                +{c.bleedYield} rep
+                              <span className="bleed-info-tooltip">
+                                <span 
+                                  className={`badge ${
+                                    c.bleedYield === 15 ? 'badge-fire text-glow-fire' : 
+                                    c.bleedYield === 10 ? 'badge-earth text-glow-earth' : 
+                                    c.bleedYield === 6 ? 'badge-water text-glow-water' : 
+                                    c.bleedYield === 3 ? 'badge-lightning text-glow-lightning' : 'badge-secondary'
+                                  }`} 
+                                  style={{ fontWeight: 'bold', fontSize: '0.85rem', cursor: 'help' }}
+                                >
+                                  +{c.bleedYield} rep
+                                </span>
+                                <RepRangeTooltip 
+                                  baseRep={current.reputation} 
+                                  targetRep={c.reputation}
+                                  activeYield={c.bleedYield}
+                                  title={`⚔️ Yield Brackets relative to Your Clan`}
+                                  subtitle={`Target: ${c.name} (#${c.rank})`}
+                                />
                               </span>
                               {c.repNeededToChange !== null && c.repNeededToChange > 0 && (
                                 <span style={{ fontSize: '0.65rem', color: 'var(--color-lightning)', whiteSpace: 'nowrap' }} title={`Next yield tier (+${c.nextLowerYield}) is reached when target loses ${c.repNeededToChange.toLocaleString()} reputation.`}>
