@@ -115,6 +115,53 @@ function App() {
   // Cleared on reset boundary so each 30-min cycle starts fresh.
   const gainingLocks = React.useRef(new Map());
   const bleedingLocks = React.useRef(new Map());
+
+  // Reset grace period states
+  const [inResetGracePeriod, setInResetGracePeriod] = useState(false);
+  const [resetGraceCountdown, setResetGraceCountdown] = useState(0);
+
+  // Last Reset history states
+  const [lastResetSnapshots, setLastResetSnapshots] = useState(() => {
+    try {
+      const stored = localStorage.getItem('ns_cw_last_reset_snapshots');
+      return stored ? JSON.parse(stored) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+  const [lastResetRankings, setLastResetRankings] = useState(() => {
+    try {
+      const stored = localStorage.getItem('ns_cw_last_reset_rankings');
+      return stored ? JSON.parse(stored) : null;
+    } catch (e) {
+      return null;
+    }
+  });
+  const lastResetGainingLocks = React.useRef(
+    new Map(
+      (() => {
+        try {
+          const stored = localStorage.getItem('ns_cw_last_reset_gaining_locks');
+          return stored ? JSON.parse(stored).map(id => [id, true]) : [];
+        } catch (e) {
+          return [];
+        }
+      })()
+    )
+  );
+  const lastResetBleedingLocks = React.useRef(
+    new Map(
+      (() => {
+        try {
+          const stored = localStorage.getItem('ns_cw_last_reset_bleeding_locks');
+          return stored ? JSON.parse(stored).map(id => [id, true]) : [];
+        } catch (e) {
+          return [];
+        }
+      })()
+    )
+  );
+  const [viewHistoryMode, setViewHistoryMode] = useState(false);
   const [sortOrder, setSortOrder] = useState('desc');
 
   // Leaderboard Filtering & Search States
@@ -303,6 +350,71 @@ function App() {
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, [showConfigDropdown]);
 
+  const handleTimeReset = (newRankings = null) => {
+    // Reset sound flags so they can fire again in the new cycle
+    soundFiredThisReset.current = { gain: false, bleed: false };
+    // Clear hysteresis locks so the new cycle starts with fresh analysis
+    gainingLocks.current.clear();
+    bleedingLocks.current.clear();
+
+    const activeRankings = newRankings || rankings;
+
+    if (activeRankings) {
+      const resetSnapshots = [
+        {
+          ...activeRankings,
+          generated_at: new Date().toISOString().replace('T', ' ').slice(0, 19) + ' (Reset Boundary Baseline)'
+        }
+      ];
+      setSnapshots(resetSnapshots);
+      safeSaveSnapshots(resetSnapshots);
+      if (newRankings) {
+        setRankings(newRankings);
+      }
+    } else {
+      setSnapshots(prev => {
+        if (prev.length === 0) return prev;
+        const latest = prev[prev.length - 1];
+        const resetSnapshots = [
+          {
+            ...latest,
+            generated_at: new Date().toISOString().replace('T', ' ').slice(0, 19) + ' (Reset Boundary Baseline)'
+          }
+        ];
+        safeSaveSnapshots(resetSnapshots);
+        return resetSnapshots;
+      });
+    }
+  };
+
+  const latestSnapshotsRef = React.useRef(snapshots);
+  useEffect(() => {
+    latestSnapshotsRef.current = snapshots;
+  }, [snapshots]);
+
+  const latestRankingsRef = React.useRef(rankings);
+  useEffect(() => {
+    latestRankingsRef.current = rankings;
+  }, [rankings]);
+
+  const latestInResetGracePeriod = React.useRef(inResetGracePeriod);
+  useEffect(() => {
+    latestInResetGracePeriod.current = inResetGracePeriod;
+  }, [inResetGracePeriod]);
+
+  const latestActualReset = React.useRef(null);
+  const endGracePeriodAndReset = async () => {
+    setInResetGracePeriod(false);
+    const loadedData = await fetchRankingsData();
+    if (loadedData) {
+      handleTimeReset(loadedData);
+    } else {
+      handleTimeReset(latestRankingsRef.current);
+    }
+    setTimeToNextPoll(pollingInterval);
+  };
+  latestActualReset.current = endGracePeriodAndReset;
+
   // Polling, Countdown & Clock Boundary Reset Effect
   // Uses a Web Worker so timers keep running accurately even when the tab is
   // backgrounded (alt-tabbed). Browsers throttle main-thread setInterval in
@@ -329,9 +441,28 @@ function App() {
       // Check boundary transition
       const currentBoundaryKey = `${now.getHours()}:${m < 30 ? '00' : '30'}`;
       if (lastResetBoundary && lastResetBoundary !== currentBoundaryKey) {
-        // Clock crossed the boundary! Reset snapshots baseline
+        // Clock crossed the boundary! Set last boundary key.
         setLastResetBoundary(currentBoundaryKey);
-        handleTimeReset();
+        
+        // Start 20s grace period
+        setInResetGracePeriod(true);
+        setResetGraceCountdown(20);
+
+        // Save current state as history BEFORE we wipe it
+        const currentSnaps = latestSnapshotsRef.current;
+        const currentRanks = latestRankingsRef.current;
+        if (currentSnaps && currentSnaps.length > 0 && currentRanks) {
+          setLastResetSnapshots(currentSnaps);
+          setLastResetRankings(currentRanks);
+          localStorage.setItem('ns_cw_last_reset_snapshots', JSON.stringify(currentSnaps));
+          localStorage.setItem('ns_cw_last_reset_rankings', JSON.stringify(currentRanks));
+          
+          // Capture current locks for history
+          lastResetGainingLocks.current = new Map(gainingLocks.current);
+          lastResetBleedingLocks.current = new Map(bleedingLocks.current);
+          localStorage.setItem('ns_cw_last_reset_gaining_locks', JSON.stringify([...gainingLocks.current.keys()]));
+          localStorage.setItem('ns_cw_last_reset_bleeding_locks', JSON.stringify([...bleedingLocks.current.keys()]));
+        }
       }
 
       // Calculate Clan War End countdown dynamically
@@ -378,12 +509,29 @@ function App() {
       }
       setCwCountdown(cwCountdownText);
 
+      // Handle Reset Grace Period Countdown
+      let inGrace = false;
+      setResetGraceCountdown(prev => {
+        if (prev > 1) {
+          inGrace = true;
+          return prev - 1;
+        } else if (prev === 1) {
+          // Grace period finished! Trigger reset and fresh poll
+          latestActualReset.current();
+          return 0;
+        }
+        return 0;
+      });
+
       // Decrement Auto-Poll Countdown
       if (isAutoPolling) {
         setHighSpeedTicksRemaining(prev => Math.max(0, prev - 1));
         setTimeToNextPoll(prev => {
           if (prev <= 1) {
-            triggerAutoPoll();
+            // Only trigger auto-poll if we are not in the grace period
+            if (!latestInResetGracePeriod.current && !inGrace) {
+              triggerAutoPoll();
+            }
             return pollingInterval;
           }
           return prev - 1;
@@ -398,38 +546,6 @@ function App() {
       worker.terminate();
     };
   }, [isAutoPolling, rankings, pollingInterval, lastResetBoundary, cwEndDay, cwTimezone]);
-
-  const handleTimeReset = () => {
-    // Reset sound flags so they can fire again in the new cycle
-    soundFiredThisReset.current = { gain: false, bleed: false };
-    // Clear hysteresis locks so the new cycle starts with fresh analysis
-    gainingLocks.current.clear();
-    bleedingLocks.current.clear();
-
-    if (rankings) {
-      const resetSnapshots = [
-        {
-          ...rankings,
-          generated_at: new Date().toISOString().replace('T', ' ').slice(0, 19) + ' (Reset Boundary Baseline)'
-        }
-      ];
-      setSnapshots(resetSnapshots);
-      safeSaveSnapshots(resetSnapshots);
-    } else {
-      setSnapshots(prev => {
-        if (prev.length === 0) return prev;
-        const latest = prev[prev.length - 1];
-        const resetSnapshots = [
-          {
-            ...latest,
-            generated_at: new Date().toISOString().replace('T', ' ').slice(0, 19) + ' (Reset Boundary Baseline)'
-          }
-        ];
-        safeSaveSnapshots(resetSnapshots);
-        return resetSnapshots;
-      });
-    }
-  };
 
   // Adaptive Polling rate trigger on rankings updates and bleed detection
   useEffect(() => {
@@ -647,6 +763,7 @@ function App() {
 
   // Silent background poll — no loading flash, just reactive state updates
   const pollData = async () => {
+    if (inResetGracePeriod) return;
     const loadedData = await fetchRankingsData();
     if (!loadedData) return; // silently skip on failure
 
@@ -663,17 +780,32 @@ function App() {
     }
   };
 
+  // Decide which data source to use for calculations: current reset or last reset history
+  const activeSnapshots = useMemo(() => {
+    if (viewHistoryMode && lastResetSnapshots && lastResetSnapshots.length > 0) {
+      return lastResetSnapshots;
+    }
+    return snapshots;
+  }, [viewHistoryMode, snapshots, lastResetSnapshots]);
+
+  const activeRankings = useMemo(() => {
+    if (viewHistoryMode && lastResetRankings) {
+      return lastResetRankings;
+    }
+    return rankings;
+  }, [viewHistoryMode, rankings, lastResetRankings]);
+
   // Calculate stats for target clan
   const targetClanData = useMemo(() => {
-    if (!rankings) return null;
-    const currentClan = rankings.clans.find(c => c.id === targetClanId);
+    if (!activeRankings) return null;
+    const currentClan = activeRankings.clans.find(c => c.id === targetClanId);
     if (!currentClan) {
       return null;
     }
 
-    const baselineSnapshot = snapshots[0];
+    const baselineSnapshot = activeSnapshots[0];
     const baselineClan = baselineSnapshot ? baselineSnapshot.clans.find(c => c.id === currentClan.id) : null;
-    const prevSnapshot = snapshots[snapshots.length - 2];
+    const prevSnapshot = activeSnapshots[activeSnapshots.length - 2];
     const prevClan = prevSnapshot ? prevSnapshot.clans.find(c => c.id === currentClan.id) : null;
 
     const memberAnalysis = currentClan.member_list.map(member => {
@@ -734,19 +866,21 @@ function App() {
       resetGain,
       gainVelocity: totalGain,
     };
-  }, [rankings, snapshots, targetClanId, sortBy, sortOrder]);
+  }, [activeRankings, activeSnapshots, targetClanId, sortBy, sortOrder]);
 
   // Dynamic Bleed Yield Analysis for all 100 clans relative to user's targeted clan
   const leaderboardAnalysis = useMemo(() => {
-    if (!rankings || !targetClanData) return [];
+    if (!activeRankings || !targetClanData) return [];
     
     const myClanRep = targetClanData.current.reputation;
     // Use baseline (first snapshot = post-reset snapshot) for cumulative gain
-    const baselineSnapshot = snapshots.length > 0 ? snapshots[0] : null;
+    const baselineSnapshot = activeSnapshots.length > 0 ? activeSnapshots[0] : null;
     // Use previous snapshot for per-tick gain detection
-    const prevSnapshot = snapshots.length >= 2 ? snapshots[snapshots.length - 2] : null;
+    const prevSnapshot = activeSnapshots.length >= 2 ? activeSnapshots[activeSnapshots.length - 2] : null;
 
-    return rankings.clans.filter(clan => clan.rank <= rankLimit).map(clan => {
+    const activeGainingLocks = viewHistoryMode ? lastResetGainingLocks : gainingLocks;
+
+    return activeRankings.clans.filter(clan => clan.rank <= rankLimit).map(clan => {
       // Cumulative gain since baseline (reset boundary)
       const baselineClan = baselineSnapshot ? baselineSnapshot.clans.find(c => c.id === clan.id) : null;
       const gain = baselineClan ? (clan.reputation - baselineClan.reputation) : 0;
@@ -780,12 +914,12 @@ function App() {
       let consecutiveStagnantTicks = 0;
       let stagnantStreakBroken = false;
 
-      for (let i = snapshots.length - 1; i >= 1; i--) {
-        const curr = snapshots[i].clans.find(c => c.id === clan.id);
-        const prev = snapshots[i - 1].clans.find(c => c.id === clan.id);
+      for (let i = activeSnapshots.length - 1; i >= 1; i--) {
+        const curr = activeSnapshots[i].clans.find(c => c.id === clan.id);
+        const prev = activeSnapshots[i - 1].clans.find(c => c.id === clan.id);
         if (!curr || !prev) continue;
 
-        const distance = snapshots.length - 1 - i; // 0 for most recent
+        const distance = activeSnapshots.length - 1 - i; // 0 for most recent
         const weight = Math.pow(DECAY_BASE, distance);
         const pairGain = curr.reputation - prev.reputation;
 
@@ -820,7 +954,7 @@ function App() {
       // This uses the ENTIRE reset's cumulative data, not just the latest tick.
       const GAIN_ENTRY_THRESHOLD = 0.15;  // normalized activity to ENTER gaining
       const GAIN_EXIT_THRESHOLD = -0.15;  // normalized activity to EXIT gaining (much lower)
-      const wasGaining = gainingLocks.current.has(clan.id);
+      const wasGaining = activeGainingLocks.current.has(clan.id);
 
       let isActivelyGaining;
       if (wasGaining) {
@@ -832,11 +966,13 @@ function App() {
         isActivelyGaining = tickGain > 0 || (gain > 0 && normalizedActivity > GAIN_ENTRY_THRESHOLD);
       }
 
-      // Update lock
-      if (isActivelyGaining) {
-        gainingLocks.current.set(clan.id, true);
-      } else {
-        gainingLocks.current.delete(clan.id);
+      // Update lock (only if not in history mode)
+      if (!viewHistoryMode) {
+        if (isActivelyGaining) {
+          gainingLocks.current.set(clan.id, true);
+        } else {
+          gainingLocks.current.delete(clan.id);
+        }
       }
 
       // ── Hysteresis for "weighted stagnant" (bleed candidate) ──
@@ -900,7 +1036,7 @@ function App() {
         bleedYield
       };
     });
-  }, [rankings, snapshots, targetClanData, rankLimit]);
+  }, [activeRankings, activeSnapshots, targetClanData, rankLimit, viewHistoryMode]);
 
   // Clans actively gaining rep (farming)
   const activelyGainingClans = useMemo(() => {
@@ -968,9 +1104,9 @@ function App() {
         const weightedLossRate = clan.avgWeightedVelocity < 0 ? -clan.avgWeightedVelocity : 0;
         
         let hoursPerTick = 6;
-        if (snapshots.length >= 2) {
-          const t1 = new Date(snapshots[snapshots.length - 1].generated_at).getTime();
-          const t2 = new Date(snapshots[snapshots.length - 2].generated_at).getTime();
+        if (activeSnapshots.length >= 2) {
+          const t1 = new Date(activeSnapshots[activeSnapshots.length - 1].generated_at).getTime();
+          const t2 = new Date(activeSnapshots[activeSnapshots.length - 2].generated_at).getTime();
           const diffHours = (t1 - t2) / (1000 * 60 * 60);
           if (diffHours > 0 && diffHours < 168) {
             hoursPerTick = diffHours;
@@ -993,8 +1129,8 @@ function App() {
       let activeMembersGaining = 0;
       let totalMemberGain = 0;
 
-      if (attacker.member_list && attacker.member_list.length > 0 && snapshots.length >= 2) {
-        const prevSnapshot = snapshots[snapshots.length - 2];
+      if (attacker.member_list && attacker.member_list.length > 0 && activeSnapshots.length >= 2) {
+        const prevSnapshot = activeSnapshots[activeSnapshots.length - 2];
         const prevClan = prevSnapshot ? prevSnapshot.clans.find(c => c.id === attacker.id) : null;
 
         if (prevClan && prevClan.member_list) {
@@ -1267,13 +1403,16 @@ function App() {
     // ── Build final results with bleed hysteresis ──
     // Once a clan is identified as bleeding, it stays locked until strong recovery
     // evidence across the whole reset period (not just one good tick).
+    const activeBleedingLocks = viewHistoryMode ? lastResetBleedingLocks : bleedingLocks;
     const newBleedingLockIds = new Set();
 
     const results = leaderboardAnalysis.map(clan => {
       const thresholdFields = computeThresholdFields(clan);
 
       if (gainingClanIds.has(clan.id)) {
-        bleedingLocks.current.delete(clan.id);
+        if (!viewHistoryMode) {
+          bleedingLocks.current.delete(clan.id);
+        }
         return {
           ...clan,
           ...thresholdFields,
@@ -1285,7 +1424,7 @@ function App() {
       }
 
       const scoreData = clanRawScores.get(clan.id);
-      const wasBleedingLocked = bleedingLocks.current.has(clan.id);
+      const wasBleedingLocked = activeBleedingLocks.current.has(clan.id);
 
       if (scoreData) {
         // Actively detected as bleeding this tick — lock it in
@@ -1331,11 +1470,13 @@ function App() {
       };
     });
 
-    // Update bleedingLocks ref with the new set
-    bleedingLocks.current = new Map([...newBleedingLockIds].map(id => [id, true]));
+    // Update bleedingLocks ref with the new set (only if not in history mode)
+    if (!viewHistoryMode) {
+      bleedingLocks.current = new Map([...newBleedingLockIds].map(id => [id, true]));
+    }
 
     return results;
-  }, [leaderboardAnalysis, activelyGainingClans, targetClanData, snapshots]);
+  }, [leaderboardAnalysis, activelyGainingClans, targetClanData, activeSnapshots, viewHistoryMode]);
 
   // Filtered Leaderboard for the rankings view
   const filteredLeaderboard = useMemo(() => {
@@ -1378,14 +1519,14 @@ function App() {
 
   // Competitive standings details (forecasting shifts)
   const competitiveData = useMemo(() => {
-    if (!rankings || !targetClanData) return null;
+    if (!activeRankings || !targetClanData) return null;
     const currentClan = targetClanData.current;
     const myRank = currentClan.rank;
 
-    const clanAhead = rankings.clans.find(c => c.rank === myRank - 1);
-    const clanBehind = rankings.clans.find(c => c.rank === myRank + 1);
+    const clanAhead = activeRankings.clans.find(c => c.rank === myRank - 1);
+    const clanBehind = activeRankings.clans.find(c => c.rank === myRank + 1);
 
-    const prevSnapshot = snapshots[snapshots.length - 2];
+    const prevSnapshot = activeSnapshots[activeSnapshots.length - 2];
     if (!prevSnapshot) {
       return { 
         clanAhead, 
@@ -1457,7 +1598,7 @@ function App() {
       overtakenText,
       overtakenClass,
     };
-  }, [rankings, targetClanData, snapshots]);
+  }, [activeRankings, targetClanData, activeSnapshots]);
 
   // Helper to generate consistent, deterministic simulation behavior profiles per reset boundary (3-hour blocks)
   const getClanSimProfile = (clanId, timestampStr) => {
@@ -1496,7 +1637,7 @@ function App() {
 
   // Generate simulated next tick
   const simulateLiveTick = () => {
-    if (!rankings) return;
+    if (!rankings || inResetGracePeriod) return;
 
     const latestSnapshot = snapshots[snapshots.length - 1];
     const newTimestamp = new Date(new Date(latestSnapshot.generated_at).getTime() + 1 * 60 * 60 * 1000)
@@ -1975,11 +2116,22 @@ function App() {
           
           {/* Bleed Reset Countdown Widget */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', paddingLeft: '1rem', borderLeft: '1px solid var(--border-color)' }}>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-gaming)' }}>NEXT RESET:</span>
-            <span className="text-number" style={{ fontSize: '1rem', fontWeight: 'bold', color: isNearReset ? 'var(--color-fire)' : 'var(--color-earth)', animation: isNearReset ? 'pulse 1s infinite alternate' : 'none' }}>
-              {bleedResetCountdown}
-            </span>
-            {isNearReset && <span className="badge badge-fire" style={{ fontSize: '0.7rem' }}>🛑 STOP ATTACKING</span>}
+            {inResetGracePeriod ? (
+              <>
+                <span style={{ fontSize: '0.8rem', color: 'var(--color-earth)', fontFamily: 'var(--font-gaming)' }}>⏳ GRACE PERIOD:</span>
+                <span className="text-number animate-pulse" style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--color-earth)' }}>
+                  {resetGraceCountdown}s remaining
+                </span>
+              </>
+            ) : (
+              <>
+                <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-gaming)' }}>NEXT RESET:</span>
+                <span className="text-number" style={{ fontSize: '1rem', fontWeight: 'bold', color: isNearReset ? 'var(--color-fire)' : 'var(--color-earth)', animation: isNearReset ? 'pulse 1s infinite alternate' : 'none' }}>
+                  {bleedResetCountdown}
+                </span>
+                {isNearReset && <span className="badge badge-fire" style={{ fontSize: '0.7rem' }}>🛑 STOP ATTACKING</span>}
+              </>
+            )}
           </div>
         </div>
         
@@ -2011,10 +2163,18 @@ function App() {
           </div>
         </div>
       </section>
-
+ 
       {/* Alert Banner System */}
-      {clanAlerts.length > 0 && (
-        <div style={{ marginBottom: '1.5rem' }}>
+      {(inResetGracePeriod || clanAlerts.length > 0) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1.5rem' }}>
+          {inResetGracePeriod && (
+            <div className="alert-box alert-box-warning animate-pulse" style={{ background: 'rgba(212, 163, 89, 0.15)', borderColor: 'var(--color-earth)', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <IconInfo className="text-glow-earth" style={{ width: '20px', height: '20px', flexShrink: 0 }} />
+              <div>
+                <strong>RESET GRACE PERIOD ACTIVE:</strong> Showing complete final data from the previous reset. Establishing new baseline and starting next cycle in <strong className="text-number" style={{ color: 'var(--color-earth)' }}>{resetGraceCountdown}s</strong>.
+              </div>
+            </div>
+          )}
           {clanAlerts.map((alert, index) => (
             <div key={index} className={`alert-box alert-box-${alert.type}`}>
               <IconAlertTriangle className={alert.type === 'error' ? 'text-glow-fire' : 'text-glow-earth'} style={{ flexShrink: 0 }} />
@@ -2333,6 +2493,37 @@ function App() {
         {/* TAB 2: LEADERBOARD & BLEED ANALYSIS */}
         {activeTab === 'leaderboard' && (
           <section className="glass-card animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            {/* History Selector Toggle */}
+            <div style={{ display: 'flex', gap: '0.5rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-gaming)', marginRight: '0.5rem' }}>VIEWING MODE:</span>
+              <button 
+                className={!viewHistoryMode ? 'btn-primary' : 'btn-secondary'} 
+                style={{ padding: '0.45rem 1.25rem', fontSize: '0.85rem', fontWeight: 'bold', minHeight: '36px' }}
+                onClick={() => setViewHistoryMode(false)}
+              >
+                ⚡ CURRENT RESET
+              </button>
+              <button 
+                className={viewHistoryMode ? 'btn-primary' : 'btn-secondary'} 
+                style={{ 
+                  padding: '0.45rem 1.25rem', 
+                  fontSize: '0.85rem', 
+                  fontWeight: 'bold', 
+                  minHeight: '36px',
+                  borderColor: viewHistoryMode ? 'var(--color-earth)' : 'transparent',
+                  boxShadow: viewHistoryMode ? 'var(--glow-earth)' : 'none'
+                }}
+                onClick={() => setViewHistoryMode(true)}
+                disabled={!lastResetRankings}
+              >
+                ⏳ LAST RESET HISTORY {!lastResetRankings && '(NO DATA)'}
+              </button>
+              {viewHistoryMode && lastResetRankings && (
+                <span className="badge badge-earth animate-pulse" style={{ marginLeft: 'auto', fontSize: '0.8rem' }}>
+                  ⏳ Showing data from previous reset ({lastResetRankings.generated_at})
+                </span>
+              )}
+            </div>
             {/* Calculation Reference Header */}
             <details style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1rem', outline: 'none' }}>
               <summary style={{ cursor: 'pointer', fontWeight: 'bold', fontFamily: 'var(--font-gaming)', color: 'var(--color-water)', fontSize: '0.9rem', outline: 'none', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -2569,7 +2760,38 @@ function App() {
 
         {/* TAB 3: ROSTER ANALYSIS */}
         {activeTab === 'roster' && (
-          <section className="glass-card animate-fade-in">
+          <section className="glass-card animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            {/* History Selector Toggle */}
+            <div style={{ display: 'flex', gap: '0.5rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-gaming)', marginRight: '0.5rem' }}>VIEWING MODE:</span>
+              <button 
+                className={!viewHistoryMode ? 'btn-primary' : 'btn-secondary'} 
+                style={{ padding: '0.45rem 1.25rem', fontSize: '0.85rem', fontWeight: 'bold', minHeight: '36px' }}
+                onClick={() => setViewHistoryMode(false)}
+              >
+                ⚡ CURRENT RESET
+              </button>
+              <button 
+                className={viewHistoryMode ? 'btn-primary' : 'btn-secondary'} 
+                style={{ 
+                  padding: '0.45rem 1.25rem', 
+                  fontSize: '0.85rem', 
+                  fontWeight: 'bold', 
+                  minHeight: '36px',
+                  borderColor: viewHistoryMode ? 'var(--color-earth)' : 'transparent',
+                  boxShadow: viewHistoryMode ? 'var(--glow-earth)' : 'none'
+                }}
+                onClick={() => setViewHistoryMode(true)}
+                disabled={!lastResetRankings}
+              >
+                ⏳ LAST RESET HISTORY {!lastResetRankings && '(NO DATA)'}
+              </button>
+              {viewHistoryMode && lastResetRankings && (
+                <span className="badge badge-earth animate-pulse" style={{ marginLeft: 'auto', fontSize: '0.8rem' }}>
+                  ⏳ Showing data from previous reset ({lastResetRankings.generated_at})
+                </span>
+              )}
+            </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', flexGrow: '1', maxWidth: '600px' }}>
                 <div style={{ position: 'relative', flexGrow: '1' }}>
@@ -2779,8 +3001,8 @@ function App() {
             <h3 style={{ marginBottom: '1.5rem' }}>CLAN EVENT TIMELINE</h3>
             
             <div className="timeline">
-              {snapshots.slice(1).reverse().map((snapshot, sIdx) => {
-                const prevSnapshot = snapshots[snapshots.length - sIdx - 2];
+              {activeSnapshots.slice(1).reverse().map((snapshot, sIdx) => {
+                const prevSnapshot = activeSnapshots[activeSnapshots.length - sIdx - 2];
                 if (!prevSnapshot) return null;
 
                 const currClan = snapshot.clans.find(c => c.id === current.id);
@@ -2862,10 +3084,10 @@ function App() {
                 <div className="timeline-content">
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
                     <strong style={{ color: 'var(--color-earth)' }}>Baseline Established</strong>
-                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{snapshots[0]?.generated_at}</span>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{activeSnapshots[0]?.generated_at}</span>
                   </div>
                   <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                    Tracker initialized. Baseline snapshot loaded with total clan reputation of <strong>{snapshots[0]?.clans.find(c => c.id === current.id)?.reputation.toLocaleString()}</strong> and {snapshots[0]?.clans.find(c => c.id === current.id)?.members} members.
+                    Tracker initialized. Baseline snapshot loaded with total clan reputation of <strong>{activeSnapshots[0]?.clans.find(c => c.id === current.id)?.reputation.toLocaleString()}</strong> and {activeSnapshots[0]?.clans.find(c => c.id === current.id)?.members} members.
                   </p>
                 </div>
               </div>
@@ -2942,7 +3164,7 @@ function App() {
                     </thead>
                     <tbody>
                       {((inspectingClan.member_list || []).slice().sort((a, b) => b.reputation - a.reputation)).map((m, idx) => {
-                        const baselineClan = snapshots[0]?.clans?.find(c => c.id === inspectingClan.id);
+                        const baselineClan = activeSnapshots[0]?.clans?.find(c => c.id === inspectingClan.id);
                         const baselineMember = baselineClan?.member_list?.find(bm => bm.id === m.id);
                         const memberResetGain = baselineMember ? (m.reputation - baselineMember.reputation) : 0;
                         
