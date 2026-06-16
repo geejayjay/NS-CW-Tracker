@@ -788,19 +788,96 @@ function App() {
   // 2. Nearby clans (within ±10 ranks) are actively gaining
   // This means someone near them is farming and they are the likely victim
   const bleedAnalysis = useMemo(() => {
+    if (!targetClanData) return [];
+
+    const myClanRep = targetClanData.current.reputation;
+
     if (activelyGainingClans.length === 0) {
-      return leaderboardAnalysis.map(clan => ({
-        ...clan,
-        isBleeding: false,
-        bleedAttackers: [],
-        bleedScore: 0,
-        bleedReason: 'Stable'
-      }));
+      return leaderboardAnalysis.map(clan => {
+        let nextLowerThreshold = null;
+        let nextLowerYield = null;
+        if (clan.diffPercent > 25) {
+          nextLowerThreshold = 25;
+          nextLowerYield = 10;
+        } else if (clan.diffPercent > 10) {
+          nextLowerThreshold = 10;
+          nextLowerYield = 6;
+        } else if (clan.diffPercent >= 0) {
+          nextLowerThreshold = 0;
+          nextLowerYield = 3;
+        } else if (clan.diffPercent >= -10) {
+          nextLowerThreshold = -10;
+          nextLowerYield = 1;
+        }
+
+        let repNeededToChange = null;
+        if (nextLowerThreshold !== null) {
+          const targetRepAtThreshold = Math.ceil(myClanRep * (1 + nextLowerThreshold / 100));
+          repNeededToChange = clan.reputation - targetRepAtThreshold;
+          if (repNeededToChange < 0) repNeededToChange = 0;
+        }
+
+        return {
+          ...clan,
+          isBleeding: false,
+          bleedAttackers: [],
+          bleedScore: 0,
+          bleedReason: 'Stable',
+          nextLowerThreshold,
+          nextLowerYield,
+          repNeededToChange,
+          timeToChange: null
+        };
+      });
     }
 
     const gainingClanIds = new Set(activelyGainingClans.map(c => c.id));
     
     return leaderboardAnalysis.map(clan => {
+      // Determine the next lower yield threshold percentage and the corresponding next yield value
+      let nextLowerThreshold = null;
+      let nextLowerYield = null;
+      if (clan.diffPercent > 25) {
+        nextLowerThreshold = 25;
+        nextLowerYield = 10;
+      } else if (clan.diffPercent > 10) {
+        nextLowerThreshold = 10;
+        nextLowerYield = 6;
+      } else if (clan.diffPercent >= 0) {
+        nextLowerThreshold = 0;
+        nextLowerYield = 3;
+      } else if (clan.diffPercent >= -10) {
+        nextLowerThreshold = -10;
+        nextLowerYield = 1;
+      }
+
+      let repNeededToChange = null;
+      let timeToChange = null;
+
+      if (nextLowerThreshold !== null) {
+        const targetRepAtThreshold = Math.ceil(myClanRep * (1 + nextLowerThreshold / 100));
+        repNeededToChange = clan.reputation - targetRepAtThreshold;
+        if (repNeededToChange < 0) repNeededToChange = 0;
+
+        // Rate of target loss (clan.tickGain < 0)
+        const targetLossRate = clan.tickGain < 0 ? -clan.tickGain : 0;
+        
+        let hoursPerTick = 6;
+        if (snapshots.length >= 2) {
+          const t1 = new Date(snapshots[snapshots.length - 1].generated_at).getTime();
+          const t2 = new Date(snapshots[snapshots.length - 2].generated_at).getTime();
+          const diffHours = (t1 - t2) / (1000 * 60 * 60);
+          if (diffHours > 0 && diffHours < 168) {
+            hoursPerTick = diffHours;
+          }
+        }
+
+        if (targetLossRate > 0) {
+          const ticksNeeded = repNeededToChange / targetLossRate;
+          timeToChange = ticksNeeded * hoursPerTick;
+        }
+      }
+
       // If this clan is itself actively gaining, it's not bleeding
       if (gainingClanIds.has(clan.id)) {
         return { 
@@ -808,7 +885,11 @@ function App() {
           isBleeding: false, 
           bleedAttackers: [],
           bleedScore: 0,
-          bleedReason: 'Stable'
+          bleedReason: 'Stable',
+          nextLowerThreshold,
+          nextLowerYield,
+          repNeededToChange,
+          timeToChange
         };
       }
 
@@ -868,10 +949,14 @@ function App() {
         isBleeding, 
         bleedAttackers: nearbyAttackers,
         bleedScore: Math.min(100, bleedScore),
-        bleedReason
+        bleedReason,
+        nextLowerThreshold,
+        nextLowerYield,
+        repNeededToChange,
+        timeToChange
       };
     });
-  }, [leaderboardAnalysis, activelyGainingClans]);
+  }, [leaderboardAnalysis, activelyGainingClans, targetClanData, snapshots]);
 
   // Filtered Leaderboard for the rankings view
   const filteredLeaderboard = useMemo(() => {
@@ -1590,6 +1675,15 @@ function App() {
                 <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '0.15rem', paddingLeft: '0.5rem', fontStyle: 'italic' }}>
                   {c.bleedReason}
                 </div>
+                {c.repNeededToChange !== null && c.repNeededToChange > 0 && (
+                  <div style={{ fontSize: '0.7rem', color: 'var(--color-lightning)', marginTop: '0.2rem', paddingLeft: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.25rem', alignItems: 'center' }}>
+                    <span>⚡ Next Yield (+{c.nextLowerYield}):</span>
+                    <strong style={{ color: 'var(--text-primary)' }}>-{c.repNeededToChange.toLocaleString()} rep</strong>
+                    {c.timeToChange !== null && (
+                      <span style={{ color: 'var(--text-muted)' }}>(~{c.timeToChange.toFixed(1)}h)</span>
+                    )}
+                  </div>
+                )}
               </div>
             ))}
             {bleedingTargets.length === 0 && (
@@ -1971,17 +2065,24 @@ function App() {
                         </td>
                         <td style={{ textAlign: 'right' }}>
                           {c.isBleeding ? (
-                            <span 
-                              className={`badge ${
-                                c.bleedYield === 15 ? 'badge-fire text-glow-fire' : 
-                                c.bleedYield === 10 ? 'badge-earth text-glow-earth' : 
-                                c.bleedYield === 6 ? 'badge-water text-glow-water' : 
-                                c.bleedYield === 3 ? 'badge-lightning text-glow-lightning' : 'badge-secondary'
-                              }`} 
-                              style={{ fontWeight: 'bold', fontSize: '0.85rem' }}
-                            >
-                              +{c.bleedYield} rep
-                            </span>
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.2rem' }}>
+                              <span 
+                                className={`badge ${
+                                  c.bleedYield === 15 ? 'badge-fire text-glow-fire' : 
+                                  c.bleedYield === 10 ? 'badge-earth text-glow-earth' : 
+                                  c.bleedYield === 6 ? 'badge-water text-glow-water' : 
+                                  c.bleedYield === 3 ? 'badge-lightning text-glow-lightning' : 'badge-secondary'
+                                }`} 
+                                style={{ fontWeight: 'bold', fontSize: '0.85rem' }}
+                              >
+                                +{c.bleedYield} rep
+                              </span>
+                              {c.repNeededToChange !== null && c.repNeededToChange > 0 && (
+                                <span style={{ fontSize: '0.65rem', color: 'var(--color-lightning)', whiteSpace: 'nowrap' }} title={`Next yield tier (+${c.nextLowerYield}) is reached when target loses ${c.repNeededToChange.toLocaleString()} reputation.`}>
+                                  -{c.repNeededToChange.toLocaleString()} rep {c.timeToChange !== null && `(~${c.timeToChange.toFixed(1)}h)`}
+                                </span>
+                              )}
+                            </div>
                           ) : (
                             <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>None (0 rep)</span>
                           )}
