@@ -735,31 +735,78 @@ function App() {
       const prevClan = prevSnapshot ? prevSnapshot.clans.find(c => c.id === clan.id) : null;
       const tickGain = prevClan ? (clan.reputation - prevClan.reputation) : 0;
 
-      // Track consecutive gain streak across ALL snapshots
-      let consecutiveGainStreak = 0;
-      for (let i = snapshots.length - 1; i >= 1; i--) {
-        const curr = snapshots[i].clans.find(c => c.id === clan.id);
-        const prev = snapshots[i - 1].clans.find(c => c.id === clan.id);
-        if (curr && prev && curr.reputation > prev.reputation) {
-          consecutiveGainStreak++;
-        } else {
-          break;
-        }
-      }
-      // A clan is "actively gaining" if it gained in the latest tick OR has cumulative gain with at least 1 streak
-      const isActivelyGaining = tickGain > 0 || (gain > 0 && consecutiveGainStreak >= 1);
+      // ── Recency-weighted activity scoring across ALL snapshots since reset ──
+      // Each tick-pair gets a weight that decays exponentially the further back it is.
+      // Weight formula: weight = decayBase ^ (distance from latest)
+      //   - Most recent tick pair (i = last): weight = 1.0
+      //   - Second most recent: weight = 0.65
+      //   - Third: weight = 0.42, etc.
+      // A tick where the clan gained rep adds +weight to the score.
+      // A tick where the clan was stagnant (0 gain) or lost rep adds -weight * 0.5.
+      // This means a clan that was gaining 3 ticks ago but stopped still has residual
+      // "activity heat" and won't be instantly removed from the gaining list.
+      const DECAY_BASE = 0.65;
+      let activityScore = 0;
+      let maxPossibleScore = 0;
+      let totalPairs = 0;
+      let weightedVelocity = 0;   // recency-weighted average gain per tick
+      let totalVelocityWeight = 0;
 
-      // Track consecutive stagnant/loss ticks (for bleeding detection)
+      // Track consecutive gain streak (still useful for display)
+      let consecutiveGainStreak = 0;
+      let streakBroken = false;
+
+      // Track consecutive stagnant ticks from the most recent
       let consecutiveStagnantTicks = 0;
+      let stagnantStreakBroken = false;
+
       for (let i = snapshots.length - 1; i >= 1; i--) {
         const curr = snapshots[i].clans.find(c => c.id === clan.id);
         const prev = snapshots[i - 1].clans.find(c => c.id === clan.id);
-        if (curr && prev && curr.reputation <= prev.reputation) {
-          consecutiveStagnantTicks++;
+        if (!curr || !prev) continue;
+
+        const distance = snapshots.length - 1 - i; // 0 for most recent
+        const weight = Math.pow(DECAY_BASE, distance);
+        const pairGain = curr.reputation - prev.reputation;
+
+        totalPairs++;
+        maxPossibleScore += weight;
+
+        if (pairGain > 0) {
+          activityScore += weight;
+          if (!streakBroken) consecutiveGainStreak++;
+          stagnantStreakBroken = true;
         } else {
-          break;
+          // Stagnant or loss: penalize lightly (half weight)
+          activityScore -= weight * 0.5;
+          streakBroken = true;
+          if (!stagnantStreakBroken) consecutiveStagnantTicks++;
         }
+
+        // Weighted velocity: contribution of each tick's gain weighted by recency
+        weightedVelocity += pairGain * weight;
+        totalVelocityWeight += weight;
       }
+
+      // Normalize activity score to 0-1 range
+      const normalizedActivity = maxPossibleScore > 0 ? activityScore / maxPossibleScore : 0;
+
+      // A clan is "actively gaining" if:
+      //   - It gained in the latest tick (always immediate), OR
+      //   - Its weighted activity score is above a threshold (0.15),
+      //     meaning it was gaining recently enough to still be "hot"
+      //   - AND it has cumulative gain > 0 since reset
+      const ACTIVITY_THRESHOLD = 0.15;
+      const isActivelyGaining = tickGain > 0 || (gain > 0 && normalizedActivity > ACTIVITY_THRESHOLD);
+
+      // Weighted velocity (rep per tick, recency-weighted average)
+      const avgWeightedVelocity = totalVelocityWeight > 0 ? weightedVelocity / totalVelocityWeight : 0;
+
+      // Stagnancy check: uses weighted score — a clan is stagnant only if its
+      // weighted activity is clearly negative (sustained 0-gain across multiple ticks)
+      // A single 0-gain tick won't make it stagnant if it was gaining recently
+      const STAGNANT_THRESHOLD = -0.1;
+      const isWeightedStagnant = normalizedActivity <= STAGNANT_THRESHOLD || (totalPairs >= 2 && consecutiveStagnantTicks >= 2);
 
       // Count inactive members in this clan
       const inactiveCount = clan.member_list.filter(m => {
@@ -791,6 +838,9 @@ function App() {
         consecutiveGainStreak,
         consecutiveStagnantTicks,
         isActivelyGaining,
+        isWeightedStagnant,
+        normalizedActivity,
+        avgWeightedVelocity,
         inactiveCount,
         inactivePercent,
         isBleeding: false, // computed below
@@ -882,8 +932,8 @@ function App() {
         repNeededToChange = clan.reputation - targetRepAtThreshold;
         if (repNeededToChange < 0) repNeededToChange = 0;
 
-        // Rate of target loss (clan.tickGain < 0)
-        const targetLossRate = clan.tickGain < 0 ? -clan.tickGain : 0;
+        // Use recency-weighted velocity for loss rate estimation instead of just last tick
+        const weightedLossRate = clan.avgWeightedVelocity < 0 ? -clan.avgWeightedVelocity : 0;
         
         let hoursPerTick = 6;
         if (snapshots.length >= 2) {
@@ -895,8 +945,8 @@ function App() {
           }
         }
 
-        if (targetLossRate > 0) {
-          const ticksNeeded = repNeededToChange / targetLossRate;
+        if (weightedLossRate > 0) {
+          const ticksNeeded = repNeededToChange / weightedLossRate;
           timeToChange = ticksNeeded * hoursPerTick;
         }
       }
@@ -924,22 +974,32 @@ function App() {
 
       // A clan is bleeding if:
       // - It's NOT gaining AND there are nearby clans that ARE gaining
-      // - Its stagnancy is suspicious (tickGain <= 0 or cumulative gain is 0)
-      const isStagnant = clan.tickGain <= 0 || clan.gain <= 0;
-      const isBleeding = isStagnant && nearbyAttackers.length > 0;
+      // - It's stagnant based on weighted analysis across all snapshots since reset
+      //   (not just a single tick — avoids false positives from momentary pauses)
+      const isBleeding = clan.isWeightedStagnant && nearbyAttackers.length > 0;
       
       // Calculate Bleed Score
       let bleedScore = 0;
       let reasons = [];
 
       if (isBleeding) {
-        // Factor 1: Stagnancy (tick gain is exactly 0 or negative)
-        if (clan.tickGain === 0) {
-          bleedScore += 50; // if it gains 0 rep it is mostly the clan bleeds
-          reasons.push("0 rep gain");
-        } else if (clan.tickGain < 0) {
-          bleedScore += 45;
-          reasons.push(`Rep drop (${clan.tickGain.toLocaleString()} rep)`);
+        // Factor 1: Weighted stagnancy severity
+        // Use normalizedActivity to grade how deeply stagnant the clan is
+        if (clan.normalizedActivity <= -0.3) {
+          bleedScore += 55;
+          reasons.push("Deeply stagnant (weighted)");
+        } else if (clan.normalizedActivity <= -0.1) {
+          bleedScore += 50;
+          reasons.push("Stagnant (weighted)");
+        } else {
+          bleedScore += 40;
+          reasons.push("Weakly stagnant (weighted)");
+        }
+
+        // Factor 1b: Latest tick confirms stagnancy
+        if (clan.tickGain < 0) {
+          bleedScore += 5;
+          reasons.push(`Latest tick: ${clan.tickGain.toLocaleString()} rep`);
         }
 
         if (clan.gain <= 0) {
