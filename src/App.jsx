@@ -2235,7 +2235,7 @@ function App() {
                       #{c.rank} {c.name}
                     </span>
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                      ({c.diffPercent >= 0 ? '+' : ''}{c.diffPercent.toFixed(0)}%)
+                      ({c.diffPercent >= 0 ? '+' : ''}{c.diffPercent.toFixed(2)}%)
                     </span>
                     <span className="bleed-info-tooltip">
                       <IconInfo style={{ color: 'var(--text-muted)', cursor: 'help' }} />
@@ -2345,7 +2345,7 @@ function App() {
           <div style={{ marginTop: '0.75rem' }}>
             <span className="text-number text-glow-water" style={{ fontSize: '2.2rem' }}>{current.members} <span style={{ fontSize: '1.2rem', color: 'var(--text-muted)' }}>/ 40</span></span>
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-              Gaining Rep: <span style={{ color: 'var(--color-wind)' }}>{members.filter(m => m.reputationGain > 0).length} ({Math.round(members.filter(m => m.reputationGain > 0).length / current.members * 100)}%)</span>
+              Gaining Rep: <span style={{ color: 'var(--color-wind)' }}>{members.filter(m => m.reputationGain > 0).length} ({((members.filter(m => m.reputationGain > 0).length / current.members) * 100).toFixed(2)}%)</span>
             </div>
           </div>
         </div>
@@ -2657,7 +2657,7 @@ function App() {
                         </td>
                         <td className="hide-mobile">
                           <span style={{ color: c.inactivePercent > 25 ? 'var(--color-fire)' : 'var(--text-primary)' }}>
-                            {c.inactiveCount} ({Math.round(c.inactivePercent)}%)
+                            {c.inactiveCount} ({c.inactivePercent.toFixed(2)}%)
                           </span>
                         </td>
                         <td>
@@ -3143,7 +3143,7 @@ function App() {
                 <div className="glass-card" style={{ padding: '0.75rem 1rem', background: 'var(--bg-tertiary)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>INACTIVE MEMBERS</div>
                   <strong style={{ fontSize: '1rem', color: inspectingClan.inactivePercent > 25 ? 'var(--color-fire)' : 'var(--text-primary)' }}>
-                    {inspectingClan.inactiveCount || 0} ({Math.round(inspectingClan.inactivePercent || 0)}%)
+                    {inspectingClan.inactiveCount || 0} ({(inspectingClan.inactivePercent || 0).toFixed(2)}%)
                   </strong>
                 </div>
               </div>
