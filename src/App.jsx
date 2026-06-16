@@ -103,6 +103,9 @@ function App() {
     return stored === null ? true : stored === 'true';
   });
   const [lastNotifiedTime, setLastNotifiedTime] = useState('');
+  // Track whether gain/bleed sounds have already fired this reset boundary.
+  // Cleared in handleTimeReset so each sound plays at most once per 30-min cycle.
+  const soundFiredThisReset = React.useRef({ gain: false, bleed: false });
   const [sortOrder, setSortOrder] = useState('desc');
 
   // Leaderboard Filtering & Search States
@@ -292,10 +295,15 @@ function App() {
   }, [showConfigDropdown]);
 
   // Polling, Countdown & Clock Boundary Reset Effect
+  // Uses a Web Worker so timers keep running accurately even when the tab is
+  // backgrounded (alt-tabbed). Browsers throttle main-thread setInterval in
+  // inactive tabs, but Worker timers are exempt from this throttling.
   useEffect(() => {
     if (!rankings) return;
 
-    const timer = setInterval(() => {
+    const worker = new Worker(new URL('./timerWorker.js', import.meta.url), { type: 'module' });
+
+    worker.onmessage = () => {
       const now = new Date();
       const m = now.getMinutes();
       const s = now.getSeconds();
@@ -372,12 +380,20 @@ function App() {
           return prev - 1;
         });
       }
-    }, 1000);
+    };
 
-    return () => clearInterval(timer);
+    worker.postMessage('start');
+
+    return () => {
+      worker.postMessage('stop');
+      worker.terminate();
+    };
   }, [isAutoPolling, rankings, pollingInterval, lastResetBoundary, cwEndDay, cwTimezone]);
 
   const handleTimeReset = () => {
+    // Reset sound flags so they can fire again in the new cycle
+    soundFiredThisReset.current = { gain: false, bleed: false };
+
     if (rankings) {
       const resetSnapshots = [
         {
@@ -482,11 +498,14 @@ function App() {
       setTimeToNextPoll(desiredInterval);
     }
 
-    // Trigger sounds and push notifications
+    // Trigger sounds and push notifications (once per reset boundary)
+    // Each sound type fires at most once per 30-min reset cycle.
+    // The flags are cleared in handleTimeReset when the boundary crosses.
     if (latestSnapshot && latestSnapshot.generated_at !== lastNotifiedTime) {
       setLastNotifiedTime(latestSnapshot.generated_at);
 
-      if (isGaining && notifyGaining) {
+      if (isGaining && notifyGaining && !soundFiredThisReset.current.gain) {
+        soundFiredThisReset.current.gain = true;
         if (enableSound) playNotificationSound('gain');
         if (enableNotifications) {
           triggerPushNotification(
@@ -496,7 +515,8 @@ function App() {
         }
       }
 
-      if (newBleeds.length > 0 && notifyBleeding) {
+      if (newBleeds.length > 0 && notifyBleeding && !soundFiredThisReset.current.bleed) {
+        soundFiredThisReset.current.bleed = true;
         const bleedingClansNames = newBleeds.map(id => {
           const c = latestSnapshot.clans.find(clan => clan.id === id);
           return c ? `${c.name} (#${c.rank})` : `ID ${id}`;
