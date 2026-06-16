@@ -33,6 +33,9 @@ const IconArrowDown = () => (
 const IconAlertTriangle = ({ className }) => (
   <svg className={className} xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
 );
+const IconInfo = ({ className, style }) => (
+  <svg className={className} style={style} xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+);
 
 function App() {
   // Config States
@@ -1637,7 +1640,7 @@ function App() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
             {bleedingTargets.slice(0, 5).map(c => (
               <div key={c.id} style={{ fontSize: '0.9rem' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                     <span 
                       style={{ cursor: 'pointer', textDecoration: 'underline', fontWeight: '500' }}
@@ -1649,15 +1652,35 @@ function App() {
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                       ({c.diffPercent >= 0 ? '+' : ''}{c.diffPercent.toFixed(0)}%)
                     </span>
+                    <span className="bleed-info-tooltip">
+                      <IconInfo style={{ color: 'var(--text-muted)', cursor: 'help' }} />
+                      <div className="tooltip-card">
+                        <div style={{ fontWeight: 'bold', marginBottom: '0.4rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.2rem', color: 'var(--color-fire)' }}>
+                          🔴 Bleed Analysis
+                        </div>
+                        <div style={{ marginBottom: '0.3rem' }}>
+                          <strong>Score:</strong> {c.bleedScore}/100
+                        </div>
+                        <div style={{ marginBottom: '0.3rem' }}>
+                          <strong>Reason:</strong> {c.bleedReason}
+                        </div>
+                        {c.bleedAttackers && c.bleedAttackers.length > 0 && (
+                          <div>
+                            <strong>Likely Attackers:</strong>
+                            <div style={{ color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
+                              {c.bleedAttackers.map(a => `${a.name} (#${a.rank})`).join(', ')}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </span>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                     <span 
-                      title={c.bleedReason}
                       style={{ 
                         fontSize: '0.7rem', 
                         fontWeight: 'bold', 
                         color: c.bleedScore >= 70 ? 'var(--color-fire)' : c.bleedScore >= 40 ? 'var(--color-earth)' : 'var(--text-secondary)',
-                        cursor: 'help'
                       }}
                     >
                       {c.bleedScore}/100
@@ -1666,14 +1689,6 @@ function App() {
                       +{c.bleedYield} yield
                     </span>
                   </div>
-                </div>
-                {c.bleedAttackers && c.bleedAttackers.length > 0 && (
-                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.15rem', paddingLeft: '0.5rem' }}>
-                    ⚔️ Likely attacker: {c.bleedAttackers.map(a => `${a.name} (#${a.rank})`).join(', ')}
-                  </div>
-                )}
-                <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '0.15rem', paddingLeft: '0.5rem', fontStyle: 'italic' }}>
-                  {c.bleedReason}
                 </div>
                 {c.repNeededToChange !== null && c.repNeededToChange > 0 && (
                   <div style={{ fontSize: '0.7rem', color: 'var(--color-lightning)', marginTop: '0.2rem', paddingLeft: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.25rem', alignItems: 'center' }}>
@@ -2026,9 +2041,31 @@ function App() {
                         </td>
                         <td>
                           {c.isBleeding ? (
-                            <span style={{ color: 'var(--color-fire)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                            <span style={{ color: 'var(--color-fire)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
                               <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-fire)', display: 'inline-block' }} className="bleeding-pulse"></span>
-                              Possible Bleed
+                              <span>Possible Bleed</span>
+                              <span className="bleed-info-tooltip">
+                                <IconInfo style={{ color: 'var(--text-muted)', cursor: 'help' }} />
+                                <div className="tooltip-card">
+                                  <div style={{ fontWeight: 'bold', marginBottom: '0.4rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.2rem', color: 'var(--color-fire)', fontFamily: 'var(--font-gaming)' }}>
+                                    🔴 Bleed Analysis
+                                  </div>
+                                  <div style={{ marginBottom: '0.3rem' }}>
+                                    <strong>Score:</strong> {c.bleedScore}/100
+                                  </div>
+                                  <div style={{ marginBottom: '0.3rem' }}>
+                                    <strong>Reason:</strong> {c.bleedReason}
+                                  </div>
+                                  {c.bleedAttackers && c.bleedAttackers.length > 0 && (
+                                    <div>
+                                      <strong>Likely Attackers:</strong>
+                                      <div style={{ color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
+                                        {c.bleedAttackers.map(a => `${a.name} (#${a.rank})`).join(', ')}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </span>
                             </span>
                           ) : (
                             <span style={{ color: 'var(--color-wind)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
@@ -2039,7 +2076,7 @@ function App() {
                         </td>
                         <td>
                           {c.isBleeding ? (
-                            <div title={c.bleedReason} style={{ cursor: 'help' }}>
+                            <div>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                 <span className="text-number" style={{ 
                                   fontWeight: 'bold', 
@@ -2054,9 +2091,6 @@ function App() {
                                     background: c.bleedScore >= 70 ? 'var(--color-fire)' : c.bleedScore >= 40 ? 'var(--color-earth)' : 'var(--text-muted)'
                                   }}></div>
                                 </div>
-                              </div>
-                              <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '0.15rem', maxWidth: '180px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                {c.bleedReason}
                               </div>
                             </div>
                           ) : (

@@ -451,3 +451,51 @@ h1, h2, h3, h4, .font-gaming {
   to { transform: scale(1) translateY(0); opacity: 1; }
 }
 
+/* Tooltip styles for Bleed Details */
+.bleed-info-tooltip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: help;
+}
+
+.bleed-info-tooltip .tooltip-card {
+  visibility: hidden;
+  width: 280px;
+  background: rgba(15, 18, 25, 0.98);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 0.85rem;
+  position: absolute;
+  z-index: 2000;
+  bottom: 130%;
+  left: 50%;
+  transform: translateX(-50%);
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.85), var(--glow-fire);
+  pointer-events: none;
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+  font-weight: normal;
+  line-height: 1.4;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.bleed-info-tooltip .tooltip-card::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 6px;
+  border-style: solid;
+  border-color: var(--border-color) transparent transparent transparent;
+}
+
+.bleed-info-tooltip:hover .tooltip-card {
+  visibility: visible;
+  opacity: 1;
+  transform: translateX(-50%) translateY(-2px);
+}
