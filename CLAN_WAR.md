@@ -32,25 +32,65 @@ If the target clan is **Bleeding**, your gain per victory scales dynamically bas
 > [!NOTE]
 > If a clan is **not** in a bleeding state, attacks on them will yield **0 reputation** per victory, regardless of the reputation difference.
 
+These brackets are defined as the `YIELD_BRACKETS` constant in `App.jsx` and can be extended with additional tiers.
 
 ---
 
 ## 3. How Bleeding Clans are Identified
 
-A clan is considered **Bleeding** if it is actively being farmed/attacked by other clans. We identify possible bleed targets by analyzing temporal snapshots using two main factors:
+Bleed targets are identified using a **yield-bracket inference** algorithm that reverse-engineers which clan an attacker is farming based on real game mechanics.
 
-### A. Reputation Stagnancy or Loss
-* The target clan's reputation gain over the latest snapshot tick is `0` or negative (`tickGain <= 0`), **OR** its cumulative gain since the last timeline boundary reset is `0` or negative (`gain <= 0`).
-* A healthy, actively playing clan will continuously increase its reputation. Stagnancy indicates they are not winning matches or are losing points due to successful attacks by opponents.
+### Step 1: Detect Actively Gaining Clans
 
-### B. Proximity to Gaining Competitors (Farming Activity)
-* There must be at least one actively farming clan within **$\pm$10 ranks** of the target clan.
-* An "actively gaining" clan is one that has a positive reputation gain in the latest tick or has shown a consistent gain streak across consecutive snapshots.
-* If a clan is stagnant *and* nearby ranks are gaining rep rapidly, it indicates that those nearby competitors are farming matches against this target, causing it to "bleed".
+A clan is classified as **actively gaining** using recency-weighted analysis across all snapshots since the last reset boundary:
+
+* Each snapshot pair is assigned an exponentially decaying weight (`0.65^distance`), so recent ticks matter more than older ones.
+* A **normalized activity score** (0 to 1) summarizes the clan's overall gain pattern across the entire reset.
+* **Hysteresis** prevents flicker: once a clan enters "gaining" status, it stays locked in until strong contradicting evidence across the whole reset period (not just one idle tick).
+
+| Transition | Condition |
+| :--- | :--- |
+| **Enter** gaining | `tickGain > 0` OR (`gain > 0` AND `normalizedActivity > 0.15`) |
+| **Exit** gaining | `normalizedActivity ≤ -0.15` AND `gain ≤ 0` (sustained negative evidence) |
+
+### Step 2: Infer the Yield Bracket from Attacker's Gain
+
+When a gaining clan is detected, the tracker analyzes **per-member reputation gains** to estimate which yield bracket (+1, +3, +6, +10, +15) the attacker is earning per battle win.
+
+1. Compare each member's rep to the previous snapshot to count active members and their individual gains.
+2. Compute the average per-member gain.
+3. For each yield bracket, calculate the implied battles per tick (`avgMemberGain / yield`).
+4. Select the bracket that gives the most reasonable battle count (targeting ~5 wins per member per tick).
+5. If member data isn't available, fall back to estimating from total clan gain with ~40% active members.
+
+### Step 3: Compute the Target Rep Range
+
+The inferred yield bracket maps to a percentage range of the **target clan's rep relative to the attacker's rep**:
+
+| Yield | Target clan rep is... | Rep Range |
+| :--- | :--- | :--- |
+| +15 | > 25% higher | `attackerRep × 1.25` → ∞ |
+| +10 | 10–25% higher | `attackerRep × 1.10` → `× 1.25` |
+| +6 | 0–10% higher | `attackerRep × 1.00` → `× 1.10` |
+| +3 | 0–10% lower | `attackerRep × 0.90` → `× 1.00` |
+| +1 | > 10% lower | 0 → `attackerRep × 0.90` |
+
+### Step 4: Match Clans in the Inferred Range
+
+Instead of using ±10 rank proximity, the tracker finds **non-gaining clans whose actual reputation falls within the computed range**. This is much more precise than rank-based proximity.
+
+### Step 5: Score and Rank Bleed Candidates
+
+Only clans that are both **in an attacker's inferred range** and **weighted-stagnant across the reset** are scored. The stagnancy check also uses hysteresis:
+
+| Transition | Condition |
+| :--- | :--- |
+| **Enter** stagnant | `normalizedActivity ≤ -0.1` OR 2+ consecutive stagnant ticks |
+| **Exit** stagnant | `normalizedActivity ≥ 0.2` AND `gain > 0` (sustained recovery) |
 
 > [!IMPORTANT]
-> **Roster Inactivity $\neq$ Bleeding**:
-> A high percentage of inactive or zero-contribution members on a roster indicates poor clan management, but it **does not** automatically classify a clan as bleeding. A bleeding state is purely defined by reputation changes in snapshots relative to nearby active competitor ranks.
+> **Roster Inactivity ≠ Bleeding**:
+> A high percentage of inactive or zero-contribution members indicates poor clan management, but it **does not** automatically classify a clan as bleeding. Bleeding is purely defined by reputation stagnancy + being in an attacker's inferred yield range.
 
 ---
 
@@ -58,33 +98,71 @@ A clan is considered **Bleeding** if it is actively being farmed/attacked by oth
 
 * **Reset Timing**:
   * Snapshot calculations reset at the top of the hour (`xx:00`) and the half-hour (`xx:30`).
-  * At each boundary, the tracker clears cumulative gains and establishes a fresh baseline snapshot to accurately observe the next interval's velocities.
+  * At each boundary, the tracker clears cumulative gains, establishes a fresh baseline snapshot, and resets all hysteresis locks (gaining, bleeding, sound notifications).
+* **Whole-Reset Analysis**:
+  * All analysis (velocity, activity scoring, stagnancy) uses **the entire reset period's data** with recency weighting, not just the last 2 snapshots. This makes the output stable and resistant to single-tick noise.
 
 ---
 
 ## 5. Bleed Score Calculation
 
-Every clan identified as potentially bleeding is assigned a **Bleed Score** (0–100) that ranks the likelihood and severity of the bleed state. The score is the sum of three weighted factors:
+Every clan identified as potentially bleeding is assigned a **Bleed Score** (0–100). The score is computed across multiple factors and adjusted by cross-context suppression.
 
-### Factor 1: Reputation Stagnancy (max 65 pts)
+### Factor 1: Position in Attacker's Target Range (max 30 pts per attacker)
 
-| Condition | Points | Rationale |
-| :--- | :---: | :--- |
-| Tick gain is exactly **0** | **+50** | A clan gaining 0 rep while neighbors gain is the strongest bleed signal ("if it gains 0 rep it is mostly the clan bleeds") |
-| Tick gain is **negative** (rep drop) | **+45** | Rep is actively decreasing — also strong, but slightly less definitive than perfect 0 |
-| Cumulative gain since reset is **≤ 0** | **+15** | No progress over the entire interval reinforces the bleed signal |
+* For each attacker that has this clan in its inferred yield range, the clan is ranked by weighted velocity (lowest velocity = most likely victim).
+* The #1 victim (lowest velocity) gets **30 points**; the last in the list gets **~5 points**.
+* Being the **primary target** (⚡) of any attacker is flagged explicitly.
 
-### Factor 2: Nearby Active Attackers (max 25 pts)
-
-* For each actively farming clan within ±10 ranks: **+8 points** (capped at 25)
-* More nearby attackers = higher confidence that this clan is the farm target
-
-### Factor 3: Attacker Intensity (max 10 pts)
+### Factor 2: Absolute Velocity Across Entire Reset (max 25 pts)
 
 | Condition | Points |
 | :--- | :---: |
-| Highest nearby attacker gain **> 1,500 rep** | **+10** |
-| Highest nearby attacker gain **> 500 rep** | **+5** |
+| Weighted velocity ≤ **-50** rep/tick | **+25** |
+| Weighted velocity ≤ **0** rep/tick | **+20** |
+| Weighted velocity ≤ **30** rep/tick | **+12** |
+| Weighted velocity ≤ **80** rep/tick | **+5** |
+
+### Factor 3: Cumulative Gain Since Reset (max 15 pts)
+
+| Condition | Points |
+| :--- | :---: |
+| Cumulative gain ≤ **0** | **+15** |
+| Cumulative gain < **100** | **+8** |
+
+### Factor 4: Weighted Stagnancy Depth (max 10 pts)
+
+| Condition | Points |
+| :--- | :---: |
+| `normalizedActivity ≤ -0.3` (deeply stagnant) | **+10** |
+| `normalizedActivity ≤ -0.1` (stagnant) | **+5** |
+
+### Factor 5: Multiple Attackers Targeting Same Clan (max 8 pts)
+
+| Condition | Points |
+| :--- | :---: |
+| Targeted by **3+** attackers | **+8** |
+| Targeted by **2** attackers | **+4** |
+
+### Cross-Context Suppression
+
+If an attacker has a **clear primary victim** (its velocity is significantly lower than the next candidate), other clans in the same target range have their scores **suppressed proportionally**:
+
+| Velocity gap from primary | Suppression |
+| :--- | :---: |
+| > 200 rep/tick | 80% reduction |
+| > 100 rep/tick | 60% reduction |
+| > 50 rep/tick | 40% reduction |
+| ≤ 50 rep/tick | 15% reduction |
+
+This prevents marking 8 clans as bleeding when only 1–2 are the actual victims.
+
+### Bleed Hysteresis (Persistence)
+
+Once a clan is identified as bleeding, it **stays locked** as bleeding until it shows strong recovery:
+* **Recovery required**: `normalizedActivity ≥ 0.2` AND `cumulative gain > 0` across the reset period.
+* A single good tick does NOT remove a clan from bleeding status.
+* All locks reset at the 30-minute boundary.
 
 ### Score Interpretation
 
@@ -98,28 +176,46 @@ Every clan identified as potentially bleeding is assigned a **Bleed Score** (0�
 
 ## 6. Adaptive Polling System
 
-The tracker dynamically adjusts its polling interval based on detected activity to balance responsiveness with efficiency:
+The tracker dynamically adjusts its polling interval across three tiers to balance data quality with API efficiency:
 
-### Polling Modes
+### Polling Tiers
 
-| Mode | Interval | Trigger |
-| :--- | :---: | :--- |
-| **Standby** | 60s | Default — no significant activity detected |
-| **Active** | 10s | Target clan is gaining reputation (farming). Constant 10s interval to capture incoming contributions. |
-| **High-Speed Detection** | 1s | A **new** bleeding clan is detected for the first time. Lasts for 30 ticks (~30s) to rapidly capture per-member gain data (+15, +10, etc.) |
+| Tier | Interval | Duration | Trigger | Purpose |
+| :--- | :---: | :---: | :--- | :--- |
+| **Burst** | 1s | 5 ticks (~5s) | New bleeding clan detected | Rapid per-member rep capture for yield bracket inference |
+| **Active** | 5s | Sustained | Gaining or established bleeds | Monitor changes without excessive API calls |
+| **Standby** | 60s | Default | No significant activity | Conserve API requests |
+
+> [!NOTE]
+> The 1s burst is intentionally short (5 ticks). Its sole purpose is to capture per-member reputation deltas so the yield bracket inference can determine which rep range the attacker is targeting. Once that data is captured, the 5s active tier provides sufficient granularity for all other analysis.
+
+### Background Tab Support (Web Worker)
+
+All timers run via a **Web Worker** (`timerWorker.js`) instead of main-thread `setInterval`. Browsers aggressively throttle `setInterval` in background tabs (sometimes to 1 tick/minute), but Worker timers are exempt. This ensures:
+* Countdowns (bleed reset, CW end) stay accurate when alt-tabbed
+* Auto-polling fires on schedule even when the tab is not visible
+* All downstream analysis (state updates, useMemo recomputation, notifications) executes normally since `Worker.onmessage` is not throttled
 
 ---
 
 ## 7. Sounds and Desktop Notifications
 
-The tracker features customized sound chimes and HTML5 push notifications to keep you alerted when critical war events occur.
+The tracker features synthesized Web Audio sound chimes and HTML5 push notifications for critical war events.
 
 ### Alert Trigger Events
 1. **⚔️ Reputation Gain Alerts**: Triggers when your tracked/target clan actively gains reputation.
 2. **🔴 Bleeding Target Alerts**: Triggers when a new bleeding opponent is identified in the rankings.
 
+### Once-Per-Reset Rate Limiting
+
+Each sound type (gain / bleed) fires **at most once per 30-minute reset cycle**:
+* When gain is first detected → plays gain chime → no more gain sounds until the next reset boundary.
+* When bleed is first detected → plays bleed warning → no more bleed sounds until the next reset boundary.
+* Flags reset automatically when `handleTimeReset` fires at the boundary crossing.
+
+This prevents sound spam during rapid polling while still alerting on the first occurrence.
+
 ### Customization & Persistent Settings
 * **Master Controls**: Turn sound alerts (`🔊/🔇`) and desktop push notifications (`🔔/🔕`) globally ON or OFF via the Polling Control Panel or settings.
 * **Specific Event Toggles**: Individually enable or disable alerts specifically for **Reputation Gains** (`⚔️`) or **Bleeding Targets** (`🔴`) to customize the tracker's noise level.
 * **Persistence**: All sound and notification choices are automatically stored in the browser's `localStorage` and persist across page reloads.
-

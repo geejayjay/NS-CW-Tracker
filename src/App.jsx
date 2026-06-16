@@ -65,7 +65,7 @@ function App() {
   
   // Adaptive Polling States
   const [isAutoPolling, setIsAutoPolling] = useState(true);
-  const [pollingInterval, setPollingInterval] = useState(60); // standard: 60 seconds
+  const [pollingInterval, setPollingInterval] = useState(60); // standby: 60s, active: 5s, burst: 1s
   const [timeToNextPoll, setTimeToNextPoll] = useState(60); // countdown
   const [consecutiveStagnantTicks, setConsecutiveStagnantTicks] = useState(0);
   const [simulationMode, setSimulationMode] = useState(() => {
@@ -106,6 +106,15 @@ function App() {
   // Track whether gain/bleed sounds have already fired this reset boundary.
   // Cleared in handleTimeReset so each sound plays at most once per 30-min cycle.
   const soundFiredThisReset = React.useRef({ gain: false, bleed: false });
+
+  // Hysteresis locks: once a clan enters "gaining" or "bleeding" state, it stays
+  // locked in until strong contradicting evidence across the whole reset.
+  // This prevents UI flicker during rapid 1s polling.
+  //   gainingLocks: Map<clanId, true>  — clans currently locked as "gaining"
+  //   bleedingLocks: Map<clanId, true> — clans currently locked as "bleeding"
+  // Cleared on reset boundary so each 30-min cycle starts fresh.
+  const gainingLocks = React.useRef(new Map());
+  const bleedingLocks = React.useRef(new Map());
   const [sortOrder, setSortOrder] = useState('desc');
 
   // Leaderboard Filtering & Search States
@@ -393,6 +402,9 @@ function App() {
   const handleTimeReset = () => {
     // Reset sound flags so they can fire again in the new cycle
     soundFiredThisReset.current = { gain: false, bleed: false };
+    // Clear hysteresis locks so the new cycle starts with fresh analysis
+    gainingLocks.current.clear();
+    bleedingLocks.current.clear();
 
     if (rankings) {
       const resetSnapshots = [
@@ -481,16 +493,24 @@ function App() {
       newBleeds = currBleedingList.filter(id => !prevBleedingList.includes(id));
       
       if (newBleeds.length > 0) {
-        // We have a new bleeding clan! Speed up polling to 1 second for 30 ticks
-        setHighSpeedTicksRemaining(30);
+        // New bleeding clan detected! 1s burst for 5 ticks to capture per-member
+        // rep changes (needed for yield bracket inference). After that, the
+        // hysteresis + weighted analysis has enough data and we slow down.
+        setHighSpeedTicksRemaining(5);
         desiredInterval = 1;
       } else if (highSpeedTicksRemaining > 0) {
+        // Still in the 1s member-data capture burst
         desiredInterval = 1;
-      } else if (isGaining) {
-        desiredInterval = 10;
+      } else if (isGaining || currBleedingList.length > 0) {
+        // Active scenario (gaining or established bleeds) — 5s monitoring
+        // is fast enough to track changes without hammering the API
+        desiredInterval = 5;
+      } else {
+        // Standby — nothing happening, check every 60s
+        desiredInterval = 60;
       }
     } else if (isGaining) {
-      desiredInterval = 10;
+      desiredInterval = 5;
     }
 
     if (pollingInterval !== desiredInterval) {
@@ -791,22 +811,54 @@ function App() {
       // Normalize activity score to 0-1 range
       const normalizedActivity = maxPossibleScore > 0 ? activityScore / maxPossibleScore : 0;
 
-      // A clan is "actively gaining" if:
-      //   - It gained in the latest tick (always immediate), OR
-      //   - Its weighted activity score is above a threshold (0.15),
-      //     meaning it was gaining recently enough to still be "hot"
-      //   - AND it has cumulative gain > 0 since reset
-      const ACTIVITY_THRESHOLD = 0.15;
-      const isActivelyGaining = tickGain > 0 || (gain > 0 && normalizedActivity > ACTIVITY_THRESHOLD);
-
       // Weighted velocity (rep per tick, recency-weighted average)
       const avgWeightedVelocity = totalVelocityWeight > 0 ? weightedVelocity / totalVelocityWeight : 0;
 
-      // Stagnancy check: uses weighted score — a clan is stagnant only if its
-      // weighted activity is clearly negative (sustained 0-gain across multiple ticks)
-      // A single 0-gain tick won't make it stagnant if it was gaining recently
-      const STAGNANT_THRESHOLD = -0.1;
-      const isWeightedStagnant = normalizedActivity <= STAGNANT_THRESHOLD || (totalPairs >= 2 && consecutiveStagnantTicks >= 2);
+      // ── Hysteresis for "actively gaining" ──
+      // Entry threshold is easy (start showing as gaining quickly).
+      // Exit threshold is much harder (stay locked until strong contradicting evidence).
+      // This uses the ENTIRE reset's cumulative data, not just the latest tick.
+      const GAIN_ENTRY_THRESHOLD = 0.15;  // normalized activity to ENTER gaining
+      const GAIN_EXIT_THRESHOLD = -0.15;  // normalized activity to EXIT gaining (much lower)
+      const wasGaining = gainingLocks.current.has(clan.id);
+
+      let isActivelyGaining;
+      if (wasGaining) {
+        // Already locked as gaining — only exit if weighted evidence is strongly negative
+        // AND cumulative gain over entire reset is zero/negative
+        isActivelyGaining = !(normalizedActivity <= GAIN_EXIT_THRESHOLD && gain <= 0);
+      } else {
+        // Not yet gaining — enter if latest tick shows gain OR weighted score is above entry
+        isActivelyGaining = tickGain > 0 || (gain > 0 && normalizedActivity > GAIN_ENTRY_THRESHOLD);
+      }
+
+      // Update lock
+      if (isActivelyGaining) {
+        gainingLocks.current.set(clan.id, true);
+      } else {
+        gainingLocks.current.delete(clan.id);
+      }
+
+      // ── Hysteresis for "weighted stagnant" (bleed candidate) ──
+      // Entry: must show sustained stagnancy across reset.
+      // Exit: must show meaningful gain across reset to break out.
+      const STAGNANT_ENTRY_THRESHOLD = -0.1;  // normalized activity to ENTER stagnant
+      const STAGNANT_EXIT_THRESHOLD = 0.2;    // normalized activity to EXIT stagnant (must show real recovery)
+      const wasStagnant = bleedingLocks.current.has(clan.id);
+
+      let isWeightedStagnant;
+      if (wasStagnant) {
+        // Already locked as stagnant — only exit if weighted evidence shows real recovery
+        // across the reset period (not just one good tick)
+        isWeightedStagnant = !(normalizedActivity >= STAGNANT_EXIT_THRESHOLD && gain > 0);
+      } else {
+        // Not yet stagnant — enter if weighted score is below entry threshold
+        // OR has 2+ consecutive stagnant ticks with enough data
+        isWeightedStagnant = normalizedActivity <= STAGNANT_ENTRY_THRESHOLD || (totalPairs >= 2 && consecutiveStagnantTicks >= 2);
+      }
+
+      // Note: bleedingLocks update happens in bleedAnalysis after we confirm
+      // the clan is actually in an attacker's range (stagnant alone != bleeding)
 
       // Count inactive members in this clan
       const inactiveCount = clan.member_list.filter(m => {
@@ -1212,11 +1264,16 @@ function App() {
       }
     });
 
-    // ── Build final results ──
-    return leaderboardAnalysis.map(clan => {
+    // ── Build final results with bleed hysteresis ──
+    // Once a clan is identified as bleeding, it stays locked until strong recovery
+    // evidence across the whole reset period (not just one good tick).
+    const newBleedingLockIds = new Set();
+
+    const results = leaderboardAnalysis.map(clan => {
       const thresholdFields = computeThresholdFields(clan);
 
       if (gainingClanIds.has(clan.id)) {
+        bleedingLocks.current.delete(clan.id);
         return {
           ...clan,
           ...thresholdFields,
@@ -1228,26 +1285,56 @@ function App() {
       }
 
       const scoreData = clanRawScores.get(clan.id);
-      if (!scoreData) {
+      const wasBleedingLocked = bleedingLocks.current.has(clan.id);
+
+      if (scoreData) {
+        // Actively detected as bleeding this tick — lock it in
+        newBleedingLockIds.add(clan.id);
         return {
           ...clan,
           ...thresholdFields,
-          isBleeding: false,
-          bleedAttackers: [],
-          bleedScore: 0,
-          bleedReason: 'Stable',
+          isBleeding: true,
+          bleedAttackers: scoreData.attackers,
+          bleedScore: Math.min(100, scoreData.rawScore),
+          bleedReason: scoreData.reasons.join(' | ') || 'Stable',
         };
+      }
+
+      if (wasBleedingLocked) {
+        // Was bleeding before but not detected this tick.
+        // Keep it locked as bleeding UNLESS the clan shows strong recovery
+        // across the entire reset (sustained positive activity + cumulative gain).
+        const hasRecovered = clan.normalizedActivity >= 0.2 && clan.gain > 0;
+
+        if (!hasRecovered) {
+          // Still locked — keep showing as bleeding with a fading score
+          newBleedingLockIds.add(clan.id);
+          return {
+            ...clan,
+            ...thresholdFields,
+            isBleeding: true,
+            bleedAttackers: [],
+            bleedScore: Math.max(10, Math.min(100, Math.round(30 + Math.abs(clan.normalizedActivity) * 40))),
+            bleedReason: 'Locked — sustained stagnancy across reset',
+          };
+        }
+        // Recovered — unlock
       }
 
       return {
         ...clan,
         ...thresholdFields,
-        isBleeding: true,
-        bleedAttackers: scoreData.attackers,
-        bleedScore: Math.min(100, scoreData.rawScore),
-        bleedReason: scoreData.reasons.join(' | ') || 'Stable',
+        isBleeding: false,
+        bleedAttackers: [],
+        bleedScore: 0,
+        bleedReason: 'Stable',
       };
     });
+
+    // Update bleedingLocks ref with the new set
+    bleedingLocks.current = new Map([...newBleedingLockIds].map(id => [id, true]));
+
+    return results;
   }, [leaderboardAnalysis, activelyGainingClans, targetClanData, snapshots]);
 
   // Filtered Leaderboard for the rankings view
