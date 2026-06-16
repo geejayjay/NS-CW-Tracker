@@ -1354,19 +1354,19 @@ function App() {
             <span className="badge badge-water" style={{ fontFamily: 'var(--font-gaming)', fontSize: '0.8rem' }}>Ninja Saga CW</span>
             <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Data: <strong style={{ color: 'var(--text-primary)' }}>{dataSource}</strong></span>
           </div>
-          <h1 className="text-glow-water" style={{ fontSize: '2.2rem', marginTop: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            {current.name} <span style={{ fontSize: '1rem', color: 'var(--text-muted)' }}>ID: {current.id}</span>
+          <h1 className="text-glow-water app-title" style={{ marginTop: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            {current.name} <span style={{ fontSize: '1rem', color: 'var(--text-muted)' }} className="hide-mobile">ID: {current.id}</span>
           </h1>
         </div>
         
         {/* Right side container with info and big Config button */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem', position: 'relative' }}>
           <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', gap: '0.25rem', alignItems: 'flex-end' }}>
-            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Season: <strong style={{ color: 'var(--color-earth)' }}>{rankings.season.name}</strong></div>
+            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }} className="hide-mobile">Season: <strong style={{ color: 'var(--color-earth)' }}>{rankings.season.name}</strong></div>
             <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
               CW Ends: <strong className="text-number" style={{ color: 'var(--color-fire)', textShadow: 'var(--glow-fire)', letterSpacing: '0.02em' }}>{cwCountdown}</strong>
             </div>
-            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Latest Update: <strong style={{ color: 'var(--text-primary)' }}>{rankings.generated_at}</strong></div>
+            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }} className="hide-mobile">Latest Update: <strong style={{ color: 'var(--text-primary)' }}>{rankings.generated_at}</strong></div>
           </div>
           
           <button 
@@ -1880,7 +1880,7 @@ function App() {
                     <thead>
                       <tr>
                         <th>Member</th>
-                        <th>Level</th>
+                        <th className="hide-mobile">Level</th>
                         <th>Total Reputation</th>
                         <th style={{ textAlign: 'right' }}>Rep Gained (Reset)</th>
                       </tr>
@@ -1896,7 +1896,7 @@ function App() {
                               <strong style={{ color: 'var(--color-water)' }}>{m.name}</strong>
                               {m.name === current.master && <span style={{ marginLeft: '0.5rem' }} className="badge badge-earth">Master</span>}
                             </td>
-                            <td>Lvl {m.level}</td>
+                            <td className="hide-mobile">Lvl {m.level}</td>
                             <td className="text-number">{m.reputation.toLocaleString()}</td>
                             <td className="text-number text-glow-wind" style={{ textAlign: 'right', fontWeight: 'bold' }}>
                               +{m.reputationGain.toLocaleString()}
@@ -1958,34 +1958,39 @@ function App() {
         {activeTab === 'leaderboard' && (
           <section className="glass-card animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             {/* Calculation Reference Header */}
-            <div style={{ padding: '1.25rem', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: '8px' }}>
-              <h4 className="text-glow-water" style={{ fontSize: '0.95rem', marginBottom: '0.5rem', fontFamily: 'var(--font-gaming)' }}>⚔️ BLEED ATTACK YIELD FORMULA</h4>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
-                When attacking a **Bleeding Clan** (a clan whose reputation is stagnant or dropping while nearby competitor ranks are actively farming), the reputation points gained per victory scale dynamically based on the percentage difference between the target's reputation and your clan's reputation (<strong>{current.name}</strong>: {current.reputation.toLocaleString()} rep):
-              </p>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', fontSize: '0.8rem' }}>
-                <div style={{ borderLeft: '3px solid var(--color-fire)', paddingLeft: '0.5rem' }}>
-                  <span style={{ color: 'var(--text-secondary)' }}>Opponent Rep &gt; 25% of Yours</span>
-                  <div style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--color-fire)' }}>+15 Reputation</div>
-                </div>
-                <div style={{ borderLeft: '3px solid var(--color-earth)', paddingLeft: '0.5rem' }}>
-                  <span style={{ color: 'var(--text-secondary)' }}>Opponent Rep &gt; 10% to 25%</span>
-                  <div style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--color-earth)' }}>+10 Reputation</div>
-                </div>
-                <div style={{ borderLeft: '3px solid var(--color-water)', paddingLeft: '0.5rem' }}>
-                  <span style={{ color: 'var(--text-secondary)' }}>Opponent Rep =&lt; 10% higher</span>
-                  <div style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--color-water)' }}>+6 Reputation</div>
-                </div>
-                <div style={{ borderLeft: '3px solid var(--color-lightning)', paddingLeft: '0.5rem' }}>
-                  <span style={{ color: 'var(--text-secondary)' }}>Opponent Rep lower, but =&lt; 10% difference</span>
-                  <div style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--color-lightning)' }}>+3 Reputation</div>
-                </div>
-                <div style={{ borderLeft: '3px solid var(--text-muted)', paddingLeft: '0.5rem' }}>
-                  <span style={{ color: 'var(--text-secondary)' }}>Else (Opponent &gt; 10% lower)</span>
-                  <div style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--text-muted)' }}>+1 Reputation</div>
+            <details style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1rem', outline: 'none' }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 'bold', fontFamily: 'var(--font-gaming)', color: 'var(--color-water)', fontSize: '0.9rem', outline: 'none', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span>⚔️ VIEW BLEED ATTACK YIELD FORMULA</span>
+                <span style={{ fontSize: '0.75rem', fontWeight: 'normal', color: 'var(--text-muted)' }}>(Click to expand)</span>
+              </summary>
+              <div style={{ marginTop: '0.75rem', borderTop: '1px solid var(--border-color)', paddingTop: '0.75rem' }}>
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
+                  When attacking a **Bleeding Clan** (a clan whose reputation is stagnant or dropping while nearby competitor ranks are actively farming), the reputation points gained per victory scale dynamically based on the percentage difference between the target's reputation and your clan's reputation (<strong>{current.name}</strong>: {current.reputation.toLocaleString()} rep):
+                </p>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', fontSize: '0.8rem' }}>
+                  <div style={{ borderLeft: '3px solid var(--color-fire)', paddingLeft: '0.5rem' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Opponent Rep &gt; 25% of Yours</span>
+                    <div style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--color-fire)' }}>+15 Reputation</div>
+                  </div>
+                  <div style={{ borderLeft: '3px solid var(--color-earth)', paddingLeft: '0.5rem' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Opponent Rep &gt; 10% to 25%</span>
+                    <div style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--color-earth)' }}>+10 Reputation</div>
+                  </div>
+                  <div style={{ borderLeft: '3px solid var(--color-water)', paddingLeft: '0.5rem' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Opponent Rep =&lt; 10% higher</span>
+                    <div style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--color-water)' }}>+6 Reputation</div>
+                  </div>
+                  <div style={{ borderLeft: '3px solid var(--color-lightning)', paddingLeft: '0.5rem' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Opponent Rep lower, but =&lt; 10% difference</span>
+                    <div style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--color-lightning)' }}>+3 Reputation</div>
+                  </div>
+                  <div style={{ borderLeft: '3px solid var(--text-muted)', paddingLeft: '0.5rem' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Else (Opponent &gt; 10% lower)</span>
+                    <div style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--text-muted)' }}>+1 Reputation</div>
+                  </div>
                 </div>
               </div>
-            </div>
+            </details>
 
             {/* Filter controls */}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -2041,12 +2046,12 @@ function App() {
                   <tr>
                     <th>Rank</th>
                     <th>Clan Name</th>
-                    <th>Master</th>
+                    <th className="hide-mobile">Master</th>
                     <th>Total Reputation</th>
                     <th>Gain (Snapshot)</th>
-                    <th>Inactive roster</th>
+                    <th className="hide-mobile">Inactive roster</th>
                     <th>State</th>
-                    <th>Bleed Score</th>
+                    <th className="hide-mobile">Bleed Score</th>
                     <th style={{ textAlign: 'right' }}>Bleed Yield</th>
                   </tr>
                 </thead>
@@ -2074,7 +2079,7 @@ function App() {
                             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>ID: {c.id} | Size: {c.members}/40</span>
                           </div>
                         </td>
-                        <td>{c.master}</td>
+                        <td className="hide-mobile">{c.master}</td>
                         <td className="text-number">{c.reputation.toLocaleString()}</td>
                         <td className="text-number">
                           {c.gain > 0 ? (
@@ -2083,7 +2088,7 @@ function App() {
                             <span style={{ color: 'var(--text-muted)' }}>0</span>
                           )}
                         </td>
-                        <td>
+                        <td className="hide-mobile">
                           <span style={{ color: c.inactivePercent > 25 ? 'var(--color-fire)' : 'var(--text-primary)' }}>
                             {c.inactiveCount} ({Math.round(c.inactivePercent)}%)
                           </span>
@@ -2123,7 +2128,7 @@ function App() {
                             </span>
                           )}
                         </td>
-                        <td>
+                        <td className="hide-mobile">
                           {c.isBleeding ? (
                             <div>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -2241,7 +2246,7 @@ function App() {
                     <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('name'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
                       Name {sortBy === 'name' ? (sortOrder === 'asc' ? '▲' : '▼') : ''}
                     </th>
-                    <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('level'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                    <th className="hide-mobile" style={{ cursor: 'pointer' }} onClick={() => { setSortBy('level'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
                       Level {sortBy === 'level' ? (sortOrder === 'asc' ? '▲' : '▼') : ''}
                     </th>
                     <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('reputation'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
@@ -2263,7 +2268,7 @@ function App() {
                           {m.name === current.master && <span className="badge badge-earth">Master</span>}
                         </div>
                       </td>
-                      <td>Lvl {m.level}</td>
+                      <td className="hide-mobile">Lvl {m.level}</td>
                       <td className="text-number">{m.reputation.toLocaleString()}</td>
                       <td className="text-number">
                         {m.reputationGain > 0 ? (
