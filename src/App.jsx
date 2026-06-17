@@ -265,7 +265,7 @@ function App() {
   const [showConfigDropdown, setShowConfigDropdown] = useState(false);
 
   // Helper to trim snapshot data to avoid localStorage QuotaExceededError (~5MB limit)
-  const trimSnapshot = (snapshot, targetId, envId, keepFull = false) => {
+  const trimSnapshot = (snapshot, targetId, envId, keepFull = false, activeGainingIds = new Set()) => {
     if (!snapshot) return null;
     if (keepFull) return snapshot;
     const tId = targetId || targetClanId;
@@ -273,7 +273,7 @@ function App() {
     return {
       ...snapshot,
       clans: (snapshot.clans || []).map(clan => {
-        const isTarget = clan.id === tId || clan.id === eId;
+        const isTarget = clan.id === tId || clan.id === eId || activeGainingIds.has(clan.id);
         if (isTarget) {
           return {
             id: clan.id,
@@ -303,7 +303,11 @@ function App() {
 
   const safeSaveSnapshots = (snapshotsList) => {
     try {
-      localStorage.setItem('ns_cw_snapshots', JSON.stringify(snapshotsList));
+      const activeGainingIds = new Set(gainingLocks.current ? [...gainingLocks.current.keys()] : []);
+      const trimmedList = snapshotsList.map((s, idx) => 
+        trimSnapshot(s, targetClanId, envClanId, idx === 0, activeGainingIds)
+      );
+      localStorage.setItem('ns_cw_snapshots', JSON.stringify(trimmedList));
     } catch (e) {
       console.error('Failed to save snapshots to localStorage:', e);
     }
@@ -548,15 +552,14 @@ function App() {
       if (prev.length > 0 && prev[0].season?.id === loadedData.season?.id) {
         const latest = prev[prev.length - 1];
         if (latest.generated_at !== loadedData.generated_at) {
-          const trimmed = trimSnapshot(loadedData);
-          const updated = [...prev, trimmed];
+          const updated = [...prev, loadedData];
           safeSaveSnapshots(updated);
           return updated;
         }
         return prev; // same data, no update
       }
       // New season or no snapshots — fresh baseline
-      const fresh = [trimSnapshot(loadedData, null, null, true)];
+      const fresh = [loadedData];
       safeSaveSnapshots(fresh);
       return fresh;
     });
@@ -2064,10 +2067,9 @@ function App() {
     // Rankings retains the full untrimmed snapshot (so we keep member_lists in-memory)
     setRankings(newSnapshot);
 
-    // Snapshots state and localStorage get the trimmed version to save space
-    const trimmedSnapshot = trimSnapshot(newSnapshot);
+    // Retain full untrimmed snapshot in memory
     setSnapshots(prev => {
-      const newSnapshotsList = [...prev, trimmedSnapshot];
+      const newSnapshotsList = [...prev, newSnapshot];
       safeSaveSnapshots(newSnapshotsList);
       return newSnapshotsList;
     });
@@ -2999,70 +3001,84 @@ function App() {
                           </span>
                         </td>
                         <td>
-                          {c.isBleeding ? (
-                            <span style={{ color: 'var(--color-fire)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
-                              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-fire)', display: 'inline-block' }} className="bleeding-pulse"></span>
-                              <span>Possible Bleed</span>
-                              <span className="bleed-info-tooltip">
-                                <IconInfo style={{ color: 'var(--text-muted)', cursor: 'help' }} />
-                                <div className="tooltip-card">
-                                  <div style={{ fontWeight: 'bold', marginBottom: '0.4rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.2rem', color: 'var(--color-fire)', fontFamily: 'var(--font-gaming)' }}>
-                                    🔴 Bleed Analysis
-                                  </div>
-                                  <div style={{ marginBottom: '0.3rem' }}>
-                                    <strong>Score:</strong> {c.bleedScore}/100
-                                  </div>
-                                  <div style={{ marginBottom: '0.3rem' }}>
-                                    <strong>Reason:</strong> {c.bleedReason}
-                                  </div>
-                                  {c.bleedAttackers && c.bleedAttackers.length > 0 && (
-                                    <div>
-                                      <strong>Likely Attackers:</strong>
-                                      <div style={{ color: 'var(--text-secondary)', marginTop: '0.15rem', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
-                                        {c.bleedAttackers.map(a => {
-                                          const rangeText = a.inferredRange 
-                                            ? `[Farming +${a.inferredYield} target in range ${Math.round(a.inferredRange.minRep).toLocaleString()} - ${a.inferredRange.maxRep === Infinity ? '∞' : Math.round(a.inferredRange.maxRep).toLocaleString()}]`
-                                            : '';
-                                          return (
-                                            <div key={a.id} style={{ fontSize: '0.7rem' }}>
-                                              • {a.name} (#{a.rank}) {rangeText}
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                            {/* Bleeding Indicator */}
+                            {c.isBleeding && (
+                              <span style={{ color: 'var(--color-fire)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-fire)', display: 'inline-block' }} className="bleeding-pulse"></span>
+                                <span>Possible Bleed</span>
+                                <span className="bleed-info-tooltip">
+                                  <IconInfo style={{ color: 'var(--text-muted)', cursor: 'help' }} />
+                                  <div className="tooltip-card">
+                                    <div style={{ fontWeight: 'bold', marginBottom: '0.4rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.2rem', color: 'var(--color-fire)', fontFamily: 'var(--font-gaming)' }}>
+                                      🔴 Bleed Analysis
                                     </div>
-                                  )}
-                                </div>
-                              </span>
-                            </span>
-                          ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
-                              <span style={{ color: 'var(--color-wind)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
-                                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-wind)', display: 'inline-block' }}></span>
-                                Active
-                              </span>
-                              {c.inferredYield && (
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                                  <span className="bleed-info-tooltip">
-                                    <span style={{ textDecoration: 'underline dotted var(--text-muted)', cursor: 'help' }}>
-                                      ⚔️ Farming (+{c.inferredYield})
-                                    </span>
-                                    <RepRangeTooltip 
-                                      baseRep={c.reputation} 
-                                      activeYield={c.inferredYield} 
-                                      title={`⚔️ Farming Brackets: ${c.name}`}
-                                      subtitle={`Inferred yield (+${c.inferredYield}) based on reputation velocity.`}
-                                    />
-                                  </span>
-                                </div>
-                              )}
-                              {c.inferredRange && (
-                                <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-                                  Range: {Math.round(c.inferredRange.minRep).toLocaleString()} - {c.inferredRange.maxRep === Infinity ? '∞' : Math.round(c.inferredRange.maxRep).toLocaleString()}
+                                    <div style={{ marginBottom: '0.3rem' }}>
+                                      <strong>Score:</strong> {c.bleedScore}/100
+                                    </div>
+                                    <div style={{ marginBottom: '0.3rem' }}>
+                                      <strong>Reason:</strong> {c.bleedReason}
+                                    </div>
+                                    {c.bleedAttackers && c.bleedAttackers.length > 0 && (
+                                      <div>
+                                        <strong>Likely Attackers:</strong>
+                                        <div style={{ color: 'var(--text-secondary)', marginTop: '0.15rem', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                                          {c.bleedAttackers.map(a => {
+                                            const rangeText = a.inferredRange 
+                                              ? `[Farming +${a.inferredYield} target in range ${Math.round(a.inferredRange.minRep).toLocaleString()} - ${a.inferredRange.maxRep === Infinity ? '∞' : Math.round(a.inferredRange.maxRep).toLocaleString()}]`
+                                              : '';
+                                            return (
+                                              <div key={a.id} style={{ fontSize: '0.7rem' }}>
+                                                • {a.name} (#{a.rank}) {rangeText}
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
                                 </span>
-                              )}
-                            </div>
-                          )}
+                              </span>
+                            )}
+
+                            {/* Active/Farming Indicator */}
+                            {c.isActivelyGaining ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                                <span style={{ color: 'var(--color-wind)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-wind)', display: 'inline-block' }}></span>
+                                  Active
+                                </span>
+                                {c.inferredYield && (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    <span className="bleed-info-tooltip">
+                                      <span style={{ textDecoration: 'underline dotted var(--text-muted)', cursor: 'help' }}>
+                                        ⚔️ Farming (+{c.inferredYield})
+                                      </span>
+                                      <RepRangeTooltip 
+                                        baseRep={c.reputation} 
+                                        activeYield={c.inferredYield} 
+                                        title={`⚔️ Farming Brackets: ${c.name}`}
+                                        subtitle={`Inferred yield (+${c.inferredYield}) based on reputation velocity.`}
+                                      />
+                                    </span>
+                                  </div>
+                                )}
+                                {c.inferredRange && (
+                                  <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                                    Range: {Math.round(c.inferredRange.minRep).toLocaleString()} - {c.inferredRange.maxRep === Infinity ? '∞' : Math.round(c.inferredRange.maxRep).toLocaleString()}
+                                  </span>
+                                )}
+                              </div>
+                            ) : (
+                              // Show stable only if not bleeding and not active
+                              !c.isBleeding && (
+                                <span style={{ color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--text-muted)', display: 'inline-block' }}></span>
+                                  Stable
+                                </span>
+                              )
+                            )}
+                          </div>
                         </td>
                         <td className="hide-mobile">
                           {c.isBleeding ? (
