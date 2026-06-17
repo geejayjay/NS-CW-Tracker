@@ -83,7 +83,7 @@ export const ANALYSIS_CONFIG = {
   LONG_TERM_RECOVERY_GAIN: 150,       // minimum cumulative reset gain to unlock
 
   // ── Adaptive Polling Configuration (seconds) ──
-  ACTIVE_POLLING_INTERVAL: 1,
+  ACTIVE_POLLING_INTERVAL: 2,
   STANDBY_POLLING_INTERVAL: 60,
 
   // ── Bleeding target narrowing and thresholding ──

@@ -967,58 +967,49 @@ function App() {
       const attackerLatest = latestSnapshot.clans.find(c => c.id === attacker.id);
       const attackerPrev = prevSnapshot ? prevSnapshot.clans.find(c => c.id === attacker.id) : null;
 
-      const votes = { 15: 0, 10: 0, 6: 0, 3: 0, 1: 0 };
-      let totalVotes = 0;
-
       if (attackerLatest && attackerLatest.member_list && attackerPrev && attackerPrev.member_list) {
+        const memberGains = [];
         attackerLatest.member_list.forEach(member => {
           const prevMember = attackerPrev.member_list.find(m => m.id === member.id);
           if (prevMember) {
             const memberGain = member.reputation - prevMember.reputation;
             if (memberGain > 0) {
-              // Map each member's gain to their single highest compatible yield bracket
-              const yields = [15, 10, 6, 3, 1];
-              let votedYield = null;
-              for (const y of yields) {
-                if (memberGain % y === 0) {
-                  const wins = memberGain / y;
-                  // Allow realistic battle count (1 to 50 wins over 3 ticks)
-                  if (wins >= 1 && wins <= 50) {
-                    votedYield = y;
-                    break;
-                  }
-                }
-              }
-              if (votedYield !== null) {
-                votes[votedYield]++;
-                totalVotes++;
-              }
+              memberGains.push(memberGain);
             }
           }
         });
-      }
 
-      if (totalVotes > 0) {
-        let bestYield = 6;
-        let maxVotes = -1;
-        // Search high-to-low so ties naturally favor the highest yield (if we handle equal cases correctly)
-        const yields = [15, 10, 6, 3, 1];
-        for (const y of yields) {
-          if (votes[y] > maxVotes) {
-            maxVotes = votes[y];
-            bestYield = y;
-          } else if (votes[y] === maxVotes && maxVotes > 0) {
-            // Explicitly resolve ties by choosing the highest yield
-            if (y > bestYield) {
+        if (memberGains.length > 0) {
+          const yields = [15, 10, 6, 3, 1];
+          let bestYield = null;
+
+          for (const y of yields) {
+            let compatibleCount = 0;
+            memberGains.forEach(gain => {
+              if (gain % y === 0) {
+                const wins = gain / y;
+                // Allow realistic battle count (1 to 50 wins over the window)
+                if (wins >= 1 && wins <= 50) {
+                  compatibleCount++;
+                }
+              }
+            });
+            const ratio = compatibleCount / memberGains.length;
+            // If at least 85% of gaining members have gains compatible with this yield
+            if (ratio >= 0.85) {
               bestYield = y;
+              break;
             }
           }
+
+          if (bestYield !== null) {
+            const inferredBracket = YIELD_BRACKETS.find(b => b.yield === bestYield) || YIELD_BRACKETS[2];
+            if (!viewHistoryMode) {
+              activeAttackerBrackets.current.set(attacker.id, inferredBracket);
+            }
+            return inferredBracket;
+          }
         }
-        const inferredBracket = YIELD_BRACKETS.find(b => b.yield === bestYield) || YIELD_BRACKETS[2];
-        if (!viewHistoryMode) {
-          activeAttackerBrackets.current.set(attacker.id, inferredBracket);
-        }
-        return inferredBracket;
       }
 
       // Fallback 1: Estimate from total clan gain in this 3-tick comparison window
