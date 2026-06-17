@@ -264,6 +264,23 @@ function App() {
   const [inspectingClan, setInspectingClan] = useState(null);
   const [showConfigDropdown, setShowConfigDropdown] = useState(false);
 
+  // Clan Inspection Modal Sorting States
+  const [modalSortBy, setModalSortBy] = useState('reputation');
+  const [modalSortOrder, setModalSortOrder] = useState('desc');
+
+  const handleModalSort = (field) => {
+    if (modalSortBy === field) {
+      setModalSortOrder(prev => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setModalSortBy(field);
+      if (field === 'name' || field === 'status') {
+        setModalSortOrder('asc');
+      } else {
+        setModalSortOrder('desc');
+      }
+    }
+  };
+
   // Helper to trim snapshot data to avoid localStorage QuotaExceededError (~5MB limit)
   const trimSnapshot = (snapshot, targetId, envId, keepFull = false, activeGainingIds = new Set()) => {
     if (!snapshot) return null;
@@ -1806,9 +1823,17 @@ function App() {
     return [...bleedAnalysis]
       .filter(c => c.isBleeding && c.id !== targetClanId)
       .sort((a, b) => {
+        // 1. Prioritize score of 100 (confirmed bleeding targets)
+        const isA100 = a.bleedScore === 100;
+        const isB100 = b.bleedScore === 100;
+        if (isA100 !== isB100) {
+          return isB100 ? 1 : -1;
+        }
+        // 2. Next sort by yield (rep gain) descending
         if (b.bleedYield !== a.bleedYield) {
           return b.bleedYield - a.bleedYield;
         }
+        // 3. Then by bleedScore descending
         if (b.bleedScore !== a.bleedScore) {
           return b.bleedScore - a.bleedScore;
         }
@@ -3238,7 +3263,9 @@ function App() {
                     <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('reputationGain'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
                       Gain (Reset) {sortBy === 'reputationGain' ? (sortOrder === 'asc' ? '▲' : '▼') : ''}
                     </th>
-                    <th>Status</th>
+                    <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('status'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                      State Info {sortBy === 'status' ? (sortOrder === 'asc' ? '▲' : '▼') : ''}
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -3540,48 +3567,111 @@ function App() {
                     <thead>
                       <tr>
                         <th>#</th>
-                        <th>Name</th>
-                        <th>Level</th>
-                        <th style={{ textAlign: 'right' }}>Gain (Reset)</th>
-                        <th style={{ textAlign: 'right' }}>Total Contribution</th>
-                        <th>Status</th>
+                        <th style={{ cursor: 'pointer' }} onClick={() => handleModalSort('name')}>
+                          Name {modalSortBy === 'name' ? (modalSortOrder === 'asc' ? '▲' : '▼') : ''}
+                        </th>
+                        <th style={{ cursor: 'pointer' }} onClick={() => handleModalSort('level')}>
+                          Level {modalSortBy === 'level' ? (modalSortOrder === 'asc' ? '▲' : '▼') : ''}
+                        </th>
+                        <th style={{ cursor: 'pointer', textAlign: 'right' }} onClick={() => handleModalSort('gain')}>
+                          Gain (Reset) {modalSortBy === 'gain' ? (modalSortOrder === 'asc' ? '▲' : '▼') : ''}
+                        </th>
+                        <th style={{ cursor: 'pointer', textAlign: 'right' }} onClick={() => handleModalSort('reputation')}>
+                          Total Contribution {modalSortBy === 'reputation' ? (modalSortOrder === 'asc' ? '▲' : '▼') : ''}
+                        </th>
+                        <th style={{ cursor: 'pointer' }} onClick={() => handleModalSort('status')}>
+                          State Info {modalSortBy === 'status' ? (modalSortOrder === 'asc' ? '▲' : '▼') : ''}
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
-                      {((liveInspectingClan.member_list || []).slice().sort((a, b) => b.reputation - a.reputation)).map((m, idx) => {
-                        const baselineClan = activeSnapshots[0]?.clans?.find(c => c.id === liveInspectingClan.id);
-                        const baselineMember = baselineClan?.member_list?.find(bm => bm.id === m.id);
-                        const memberResetGain = baselineMember ? (m.reputation - baselineMember.reputation) : 0;
-                        
-                        const isZeroRep = m.reputation === 0;
-                        const isUnderperforming = m.level >= 80 && m.reputation < 200;
-                        
-                        let statusBadge = <span className="badge badge-secondary">Stale</span>;
-                        if (memberResetGain > 0) {
-                          statusBadge = <span className="badge badge-wind">Active</span>;
-                        } else if (!baselineMember) {
-                          statusBadge = <span className="badge badge-water">Joined</span>;
-                        } else if (isZeroRep) {
-                          statusBadge = <span className="badge badge-fire">Zero Contribution</span>;
-                        } else if (isUnderperforming) {
-                          statusBadge = <span className="badge badge-earth">Underperforming</span>;
-                        }
-                        return (
-                          <tr key={m.id}>
-                            <td>{idx + 1}</td>
-                            <td><strong>{m.name}</strong> <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>ID: {m.id}</span></td>
-                            <td>Lvl {m.level}</td>
-                            <td className="text-number text-glow-wind" style={{ textAlign: 'right', fontWeight: 'bold' }}>
-                              {memberResetGain > 0 ? `+${memberResetGain.toLocaleString()}` : '0'}
-                            </td>
-                            <td className="text-number" style={{ textAlign: 'right' }}>{m.reputation.toLocaleString()}</td>
-                            <td>{statusBadge}</td>
-                          </tr>
-                        );
-                      })}
+                      {(() => {
+                        const membersWithGains = (liveInspectingClan.member_list || []).map(m => {
+                          const baselineClan = activeSnapshots[0]?.clans?.find(c => c.id === liveInspectingClan.id);
+                          const baselineMember = baselineClan?.member_list?.find(bm => bm.id === m.id);
+                          const memberResetGain = baselineMember ? (m.reputation - baselineMember.reputation) : 0;
+                          
+                          const isZeroRep = m.reputation === 0;
+                          const isUnderperforming = m.level >= 80 && m.reputation < 200;
+                          
+                          let statusText = 'Stale';
+                          if (memberResetGain > 0) {
+                            statusText = 'Active';
+                          } else if (!baselineMember) {
+                            statusText = 'Joined';
+                          } else if (isZeroRep) {
+                            statusText = 'Zero Contribution';
+                          } else if (isUnderperforming) {
+                            statusText = 'Underperforming';
+                          }
+
+                          return {
+                            ...m,
+                            resetGain: memberResetGain,
+                            statusText,
+                            baselineMember
+                          };
+                        });
+
+                        membersWithGains.sort((a, b) => {
+                          let valA, valB;
+                          if (modalSortBy === 'name') {
+                            valA = a.name.toLowerCase();
+                            valB = b.name.toLowerCase();
+                          } else if (modalSortBy === 'level') {
+                            valA = a.level;
+                            valB = b.level;
+                          } else if (modalSortBy === 'gain') {
+                            valA = a.resetGain;
+                            valB = b.resetGain;
+                          } else if (modalSortBy === 'reputation') {
+                            valA = a.reputation;
+                            valB = b.reputation;
+                          } else if (modalSortBy === 'status') {
+                            valA = a.statusText;
+                            valB = b.statusText;
+                          } else {
+                            valA = a.reputation;
+                            valB = b.reputation;
+                          }
+
+                          if (valA < valB) return modalSortOrder === 'asc' ? -1 : 1;
+                          if (valA > valB) return modalSortOrder === 'asc' ? 1 : -1;
+                          return 0;
+                        });
+
+                        return membersWithGains.map((m, idx) => {
+                          const isZeroRep = m.reputation === 0;
+                          const isUnderperforming = m.level >= 80 && m.reputation < 200;
+                          
+                          let statusBadge = <span className="badge badge-secondary">Stale</span>;
+                          if (m.resetGain > 0) {
+                            statusBadge = <span className="badge badge-wind">Active</span>;
+                          } else if (!m.baselineMember) {
+                            statusBadge = <span className="badge badge-water">Joined</span>;
+                          } else if (isZeroRep) {
+                            statusBadge = <span className="badge badge-fire">Zero Contribution</span>;
+                          } else if (isUnderperforming) {
+                            statusBadge = <span className="badge badge-earth">Underperforming</span>;
+                          }
+
+                          return (
+                            <tr key={m.id}>
+                              <td>{idx + 1}</td>
+                              <td><strong>{m.name}</strong> <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>ID: {m.id}</span></td>
+                              <td>Lvl {m.level}</td>
+                              <td className="text-number text-glow-wind" style={{ textAlign: 'right', fontWeight: 'bold' }}>
+                                {m.resetGain > 0 ? `+${m.resetGain.toLocaleString()}` : '0'}
+                              </td>
+                              <td className="text-number" style={{ textAlign: 'right' }}>{m.reputation.toLocaleString()}</td>
+                              <td>{statusBadge}</td>
+                            </tr>
+                          );
+                        });
+                      })()}
                       {(!liveInspectingClan.member_list || liveInspectingClan.member_list.length === 0) && (
                         <tr>
-                          <td colSpan="5" style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                          <td colSpan="6" style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
                             No member list data available.
                           </td>
                         </tr>
