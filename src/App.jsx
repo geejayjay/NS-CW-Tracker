@@ -139,7 +139,7 @@ function App() {
   
   // Adaptive Polling States
   const [isAutoPolling, setIsAutoPolling] = useState(true);
-  const [pollingInterval, setPollingInterval] = useState(60); // standby: 60s, active: 5s, burst: 1s
+  const [pollingInterval, setPollingInterval] = useState(60); // standby: 60s, active: 3s
   const [timeToNextPoll, setTimeToNextPoll] = useState(60); // countdown
   const [consecutiveStagnantTicks, setConsecutiveStagnantTicks] = useState(0);
   const [simulationMode, setSimulationMode] = useState(() => {
@@ -147,7 +147,6 @@ function App() {
     if (!isSimEnabled) return false;
     return localStorage.getItem('ns_cw_simulation_mode') === 'true';
   });
-  const [highSpeedTicksRemaining, setHighSpeedTicksRemaining] = useState(0); // high speed 1s polling countdown
   
   // Bleed Reset Countdown States
   const [bleedResetCountdown, setBleedResetCountdown] = useState('00m 00s');
@@ -800,9 +799,8 @@ function App() {
 
       let isActivelyGaining;
       if (wasGaining) {
-        // Already locked as gaining — only exit if weighted evidence is strongly negative
-        // AND cumulative gain over entire reset is zero/negative
-        isActivelyGaining = !(normalizedActivity <= GAIN_EXIT_THRESHOLD && gain <= 0);
+        // Already locked as gaining — only exit if stagnant for 5+ ticks OR cumulative gain is zero/negative
+        isActivelyGaining = !(consecutiveStagnantTicks >= 5 || gain <= 0);
       } else {
         // Not yet gaining — enter if latest tick shows gain OR weighted score is above entry
         isActivelyGaining = tickGain > 0 || (gain > 0 && normalizedActivity > GAIN_ENTRY_THRESHOLD);
@@ -951,58 +949,79 @@ function App() {
     // Helper: infer the yield bracket an attacker is likely using.
     // Looks at per-member gain to estimate the per-win yield, then maps to a bracket.
     const inferYieldBracket = (attacker) => {
-      // Try to count active members gaining rep (those with member_list data)
-      let activeMembersGaining = 0;
-      let totalMemberGain = 0;
+      const activeAttackerBrackets = viewHistoryMode ? lastResetAttackerBrackets : attackerBrackets;
 
-      if (attacker.member_list && attacker.member_list.length > 0 && activeSnapshots.length >= 2) {
-        const prevSnapshot = activeSnapshots[activeSnapshots.length - 2];
-        const prevClan = prevSnapshot ? prevSnapshot.clans.find(c => c.id === attacker.id) : null;
-
-        if (prevClan && prevClan.member_list) {
-          attacker.member_list.forEach(member => {
-            const prevMember = prevClan.member_list.find(m => m.id === member.id);
-            if (prevMember) {
-              const memberGain = member.reputation - prevMember.reputation;
-              if (memberGain > 0) {
-                activeMembersGaining++;
-                totalMemberGain += memberGain;
-              }
-            }
-          });
-        }
+      if (activeSnapshots.length < 2) {
+        return YIELD_BRACKETS[2]; // fallback to default +6
       }
 
-      // Estimate per-member yield
-      let estimatedYieldPerWin = null;
-      if (activeMembersGaining > 0) {
-        const avgMemberGain = totalMemberGain / activeMembersGaining;
-        // Each member does multiple battles per tick; estimate wins per tick
-        // Typical: 3-10 battles per tick. Use the gain to find closest bracket.
-        // If avg member gain is 45 and yield is 15, that's ~3 wins. If yield is 6, ~7.5 wins.
-        // We check which bracket the per-member gain best fits by trying each bracket
-        // and seeing which gives the most reasonable battles-per-tick count (2-15 range).
-        let bestBracket = YIELD_BRACKETS[2]; // default +6
-        let bestFit = Infinity;
+      const latestSnapshot = activeSnapshots[activeSnapshots.length - 1];
+      // Compare latest snapshot with snapshot 3 ticks ago for stability
+      const prevSnapshotIndex = Math.max(0, activeSnapshots.length - 1 - 3);
+      const prevSnapshot = activeSnapshots[prevSnapshotIndex];
 
-        YIELD_BRACKETS.forEach(bracket => {
-          if (bracket.yield === 0) return;
-          const impliedBattles = avgMemberGain / bracket.yield;
-          if (impliedBattles >= ANALYSIS_CONFIG.MIN_BATTLES_PER_TICK && impliedBattles <= ANALYSIS_CONFIG.MAX_BATTLES_PER_TICK) {
-            // Prefer brackets that give a battle count closest to target (most common)
-            const fit = Math.abs(impliedBattles - ANALYSIS_CONFIG.TARGET_BATTLES_PER_TICK);
-            if (fit < bestFit) {
-              bestFit = fit;
-              bestBracket = bracket;
+      const attackerLatest = latestSnapshot.clans.find(c => c.id === attacker.id);
+      const attackerPrev = prevSnapshot ? prevSnapshot.clans.find(c => c.id === attacker.id) : null;
+
+      const votes = { 15: 0, 10: 0, 6: 0, 3: 0, 1: 0 };
+      let totalVotes = 0;
+
+      if (attackerLatest && attackerLatest.member_list && attackerPrev && attackerPrev.member_list) {
+        attackerLatest.member_list.forEach(member => {
+          const prevMember = attackerPrev.member_list.find(m => m.id === member.id);
+          if (prevMember) {
+            const memberGain = member.reputation - prevMember.reputation;
+            if (memberGain > 0) {
+              // Map each member's gain to their single highest compatible yield bracket
+              const yields = [15, 10, 6, 3, 1];
+              let votedYield = null;
+              for (const y of yields) {
+                if (memberGain % y === 0) {
+                  const wins = memberGain / y;
+                  // Allow realistic battle count (1 to 50 wins over 3 ticks)
+                  if (wins >= 1 && wins <= 50) {
+                    votedYield = y;
+                    break;
+                  }
+                }
+              }
+              if (votedYield !== null) {
+                votes[votedYield]++;
+                totalVotes++;
+              }
             }
           }
         });
+      }
 
-        estimatedYieldPerWin = bestBracket.yield;
-      } else if (attacker.tickGain > 0) {
-        // Fallback: use total clan gain and estimated active members (~10-20)
+      if (totalVotes > 0) {
+        let bestYield = 6;
+        let maxVotes = -1;
+        // Search high-to-low so ties naturally favor the highest yield (if we handle equal cases correctly)
+        const yields = [15, 10, 6, 3, 1];
+        for (const y of yields) {
+          if (votes[y] > maxVotes) {
+            maxVotes = votes[y];
+            bestYield = y;
+          } else if (votes[y] === maxVotes && maxVotes > 0) {
+            // Explicitly resolve ties by choosing the highest yield
+            if (y > bestYield) {
+              bestYield = y;
+            }
+          }
+        }
+        const inferredBracket = YIELD_BRACKETS.find(b => b.yield === bestYield) || YIELD_BRACKETS[2];
+        if (!viewHistoryMode) {
+          activeAttackerBrackets.current.set(attacker.id, inferredBracket);
+        }
+        return inferredBracket;
+      }
+
+      // Fallback 1: Estimate from total clan gain in this 3-tick comparison window
+      const totalClanGain = attackerLatest && attackerPrev ? (attackerLatest.reputation - attackerPrev.reputation) : 0;
+      if (totalClanGain > 0) {
         const estimatedActiveMembers = Math.max(5, Math.min(30, attacker.members * ANALYSIS_CONFIG.FALLBACK_ACTIVE_MEMBER_RATIO));
-        const avgMemberGain = attacker.tickGain / estimatedActiveMembers;
+        const avgMemberGain = totalClanGain / estimatedActiveMembers;
 
         let bestBracket = YIELD_BRACKETS[2];
         let bestFit = Infinity;
@@ -1017,26 +1036,19 @@ function App() {
             }
           }
         });
-        estimatedYieldPerWin = bestBracket.yield;
-      }
-
-      const activeAttackerBrackets = viewHistoryMode ? lastResetAttackerBrackets : attackerBrackets;
-
-      if (estimatedYieldPerWin !== null) {
-        const inferredBracket = YIELD_BRACKETS.find(b => b.yield === estimatedYieldPerWin) || YIELD_BRACKETS[2];
+        const inferredBracket = bestBracket;
         if (!viewHistoryMode) {
           activeAttackerBrackets.current.set(attacker.id, inferredBracket);
         }
         return inferredBracket;
       }
 
-      // If tick gain is 0, attempt to retrieve the previously cached bracket for this attacker
+      // Fallback 2: Retrieve cached bracket
       if (activeAttackerBrackets.current.has(attacker.id)) {
         return activeAttackerBrackets.current.get(attacker.id);
       }
 
-      // Default fallback
-      return YIELD_BRACKETS[2];
+      return YIELD_BRACKETS[2]; // Default fallback
     };
 
     // Helper: given an attacker's rep and a yield bracket, compute the target clan rep range
@@ -1073,10 +1085,10 @@ function App() {
       const bracket = inferYieldBracket(attacker);
       const range = computeTargetRepRange(attacker.reputation, bracket);
 
-      // Find non-gaining clans in target range
-      const stagnantInRange = leaderboardAnalysis
+      // Find ALL clans in target range (excluding the attacker itself)
+      const candidatesInRange = leaderboardAnalysis
         .filter(c => {
-          if (gainingClanIds.has(c.id)) return false;
+          if (c.id === attacker.id) return false;
           return c.reputation >= range.minRep && c.reputation <= range.maxRep;
         })
         .map(c => ({
@@ -1089,11 +1101,11 @@ function App() {
         }))
         .sort((a, b) => a.velocity - b.velocity); // lowest velocity first
 
-      // Narrow down to best stagnant targets: lowest velocity + tie margin
+      // Narrow down to best targets: lowest velocity + tie margin
       let bestMatchingClans = [];
-      if (stagnantInRange.length > 0) {
-        const lowestVelocity = stagnantInRange[0].velocity;
-        bestMatchingClans = stagnantInRange.filter(
+      if (candidatesInRange.length > 0) {
+        const lowestVelocity = candidatesInRange[0].velocity;
+        bestMatchingClans = candidatesInRange.filter(
           c => c.velocity <= lowestVelocity + ANALYSIS_CONFIG.VELOCITY_TIE_MARGIN
         );
       }
@@ -1101,17 +1113,16 @@ function App() {
       attackerTargetMap.set(attacker.id, {
         bracket,
         range,
-        matchingClans: bestMatchingClans, // only keep the best/tied candidate(s)
+        matchingClans: bestMatchingClans,
         attackerName: attacker.name,
         attackerRep: attacker.reputation,
         attackerGain: attacker.gain,
+        attackerVelocity: attacker.avgWeightedVelocity,
       });
     });
 
     // ── Pass 1.5: Slow-Gainer Bleed Detection ──
     // Detects gaining clans that are likely being bled while also farming.
-    // Key insight: if most clans in a yield range gain at +6 rate but one
-    // only gains at +3 rate, the slow one is probably being bled.
     const slowGainerCandidates = new Map(); // clanId → { gainRate, medianRate, attackers[] }
 
     // Helper: estimate gain per active member for a clan
@@ -1157,13 +1168,11 @@ function App() {
       ? allGainRates[Math.floor(allGainRates.length / 2)]
       : 1;
 
-    // For each attacker, check if any OTHER gaining clans fall in its target range
-    // and have a significantly lower gain rate. Pick only the slowest slow-gaining target(s).
+    // Identify slow gainers targeted by each attacker
     if (activelyGainingClans.length >= 2) {
       attackerTargetMap.forEach((data, attackerId) => {
         const { range, bracket, attackerName } = data;
 
-        // Find gaining clans (excluding the attacker itself) whose rep is in this target range
         const gainingInRange = activelyGainingClans.filter(c => {
           if (c.id === attackerId) return false;
           return c.reputation >= range.minRep && c.reputation <= range.maxRep;
@@ -1171,7 +1180,6 @@ function App() {
 
         if (gainingInRange.length === 0) return;
 
-        // Compute rates and filter by threshold
         const slowGainers = gainingInRange
           .map(c => ({
             clan: c,
@@ -1182,7 +1190,6 @@ function App() {
 
         if (slowGainers.length === 0) return;
 
-        // Keep only the slowest + tie margin
         const slowestRate = slowGainers[0].rate;
         const bestSlowGainers = slowGainers.filter(
           item => item.rate <= slowestRate * (1 + ANALYSIS_CONFIG.SLOW_GAINER_TIE_MARGIN)
@@ -1214,15 +1221,9 @@ function App() {
     }
 
     // ── Pass 2: Compute raw bleed scores per clan ──
-    // Now includes both stagnant clans AND slow-gainer candidates.
     const clanRawScores = new Map();
 
     leaderboardAnalysis.forEach(clan => {
-      const isSlowGainer = slowGainerCandidates.has(clan.id);
-
-      // Skip gaining clans UNLESS they are slow-gainer candidates
-      if (gainingClanIds.has(clan.id) && !isSlowGainer) return;
-
       // Find all attackers that have this clan in their inferred target range
       const matchingAttackers = [];
       attackerTargetMap.forEach((data, attackerId) => {
@@ -1235,24 +1236,21 @@ function App() {
             totalInList: data.matchingClans.length,
             attackerName: data.attackerName,
             attackerGain: data.attackerGain,
+            attackerVelocity: data.attackerVelocity,
           });
         }
       });
 
+      const isSlowGainer = slowGainerCandidates.has(clan.id);
       if (matchingAttackers.length === 0 && !isSlowGainer) return;
-
-      // For stagnant (non-gaining) clans, require weighted stagnancy.
-      // For slow-gainer candidates, skip the stagnancy check — they ARE gaining,
-      // just at a suspiciously low rate.
-      if (!isSlowGainer && !clan.isWeightedStagnant) return;
 
       let rawScore = 0;
       let reasons = [];
       let isPrimaryForAny = false;
       const attackerDetails = [];
 
-      // ── Factor 1: Position in inferred target range per attacker ──
-      matchingAttackers.forEach(({ bracket, positionInList, totalInList, attackerName, attackerGain }) => {
+      // ── Factor 1: Position in inferred target range per attacker & velocity gap ──
+      matchingAttackers.forEach(({ bracket, positionInList, totalInList, attackerName, attackerVelocity }) => {
         attackerDetails.push(activelyGainingClans.find(a => a.name === attackerName));
 
         // #1 match in range gets 30 points, decreasing for later positions
@@ -1265,9 +1263,19 @@ function App() {
         } else {
           reasons.push(`In range of ${attackerName} (${bracket.label})`);
         }
+
+        // Velocity gap relative to attacker
+        const velocityGap = attackerVelocity - clan.avgWeightedVelocity;
+        if (velocityGap > 100) {
+          rawScore += 15;
+          reasons.push(`Significant velocity gap vs ${attackerName} (+${Math.round(velocityGap)}/tick)`);
+        } else if (velocityGap > 50) {
+          rawScore += 8;
+          reasons.push(`Moderate velocity gap vs ${attackerName} (+${Math.round(velocityGap)}/tick)`);
+        }
       });
 
-      // ── Factor 2: Absolute velocity across entire reset ──
+      // ── Factor 2: Absolute velocity across multiple snapshots ──
       if (clan.avgWeightedVelocity <= -50) {
         rawScore += 25;
         reasons.push(`Strong rep loss (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
@@ -1282,7 +1290,7 @@ function App() {
         reasons.push(`Low velocity (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
       }
 
-      // ── Factor 3: Cumulative gain since reset (lowest = most suspicious) ──
+      // ── Factor 3: Cumulative gain since reset ──
       if (clan.gain <= 0) {
         rawScore += 15;
         reasons.push("No cumulative gain since reset");
@@ -1291,7 +1299,7 @@ function App() {
         reasons.push(`Very low cumulative gain (+${clan.gain})`);
       }
 
-      // ── Factor 4: Weighted stagnancy depth ──
+      // ── Factor 4: Weighted activity depth ──
       if (clan.normalizedActivity <= -0.3) {
         rawScore += 10;
         reasons.push("Deeply stagnant (weighted)");
@@ -1314,8 +1322,6 @@ function App() {
         const sgData = slowGainerCandidates.get(clan.id);
         const ratioPercent = Math.round(sgData.ratio * 100);
 
-        // Score based on how far below the median the gain rate is
-        // ratio ≤ 25% of median → +20 pts, ≤ 50% → +12 pts
         if (sgData.ratio <= 0.25) {
           rawScore += 20;
           reasons.push(`🐌 Very slow gainer (${ratioPercent}% of median rate)`);
@@ -1324,7 +1330,6 @@ function App() {
           reasons.push(`🐌 Slow gainer (${ratioPercent}% of median rate)`);
         }
 
-        // Add attacker context from slow-gainer detection
         sgData.attackers.forEach(({ attackerName, bracket }) => {
           const alreadyListed = matchingAttackers.some(a => a.attackerName === attackerName);
           if (!alreadyListed) {
@@ -1333,7 +1338,7 @@ function App() {
           }
         });
 
-        // Cap score for slow-gainer candidates (weaker signal than stagnant clans)
+        // Cap score for gaining clans to protect against noise, but high enough to flag
         rawScore = Math.min(rawScore, ANALYSIS_CONFIG.SLOW_GAINER_MAX_SCORE);
       }
 
@@ -1347,8 +1352,6 @@ function App() {
     });
 
     // ── Pass 3: Cross-context suppression ──
-    // For each attacker, if there's a clear primary victim in the inferred range,
-    // suppress scores of other high-velocity clans in the same range.
     attackerTargetMap.forEach((data) => {
       const { matchingClans } = data;
       if (matchingClans.length < 2) return;
@@ -1356,13 +1359,11 @@ function App() {
       const primaryVictim = matchingClans[0]; // lowest velocity
       const secondVictim = matchingClans[1];
 
-      // "Clear primary" = significantly lower velocity than the second candidate
       const velocityGap = secondVictim.velocity - primaryVictim.velocity;
       const isClearPrimary = velocityGap > 50 || (primaryVictim.velocity <= 0 && secondVictim.velocity > 50);
 
       if (!isClearPrimary) return;
 
-      // Suppress others proportionally to velocity gap from primary
       for (let i = 1; i < matchingClans.length; i++) {
         const victim = matchingClans[i];
         const scoreData = clanRawScores.get(victim.clanId);
@@ -1387,45 +1388,51 @@ function App() {
       }
     });
 
-    // ── Build final results with bleed hysteresis ──
-    // Once a clan is identified as bleeding, it stays locked until strong recovery
-    // evidence across the whole reset period (not just one good tick).
+    // ── Build final results with dynamic lock cooldowns ──
     const activeBleedingLocks = viewHistoryMode ? lastResetBleedingLocks : bleedingLocks;
     const newBleedingLocks = new Map();
 
     const results = leaderboardAnalysis.map(clan => {
       const thresholdFields = computeThresholdFields(clan);
+      const scoreData = clanRawScores.get(clan.id);
+      const wasBleedingLocked = activeBleedingLocks.current.has(clan.id);
 
-      if (gainingClanIds.has(clan.id)) {
-        const attackerData = attackerTargetMap.get(clan.id);
-        const inferredYield = attackerData?.bracket?.yield;
-        const inferredRange = attackerData?.range;
-        const inferredBracketLabel = attackerData?.bracket?.label;
-
-        // Check if this gaining clan is a slow-gainer bleed candidate
-        const scoreData = clanRawScores.get(clan.id);
-        if (scoreData && scoreData.rawScore >= ANALYSIS_CONFIG.MIN_BLEED_SCORE) {
-          const mappedAttackers = scoreData.attackers.map(a => {
-            const aData = attackerTargetMap.get(a.id);
-            return {
-              ...a,
-              inferredYield: aData?.bracket?.yield,
-              inferredRange: aData?.range,
-              inferredBracketLabel: aData?.bracket?.label,
-            };
-          });
-
-          // Slow-gainer: gaining but likely being bled
-          const lockObj = {
-            lastDetectedTime: Date.now(),
-            lastDetectedIndex: activeSnapshots.length - 1,
-            attackers: mappedAttackers,
-            bleedScore: Math.min(ANALYSIS_CONFIG.SLOW_GAINER_MAX_SCORE, scoreData.rawScore),
-            bleedReason: scoreData.reasons.join(' | ') || '🐌 Slow gainer — possible bleed-while-gaining',
+      // 1. Actively detected bleeding this tick
+      if (scoreData && scoreData.rawScore >= ANALYSIS_CONFIG.MIN_BLEED_SCORE) {
+        const mappedAttackers = scoreData.attackers.map(a => {
+          const aData = attackerTargetMap.get(a.id);
+          return {
+            ...a,
+            inferredYield: aData?.bracket?.yield,
+            inferredRange: aData?.range,
+            inferredBracketLabel: aData?.bracket?.label,
           };
-          if (!viewHistoryMode) {
-            newBleedingLocks.set(clan.id, lockObj);
-          }
+        });
+
+        const prevLock = activeBleedingLocks.current.get(clan.id);
+        const prevTicks = prevLock && typeof prevLock === 'object' ? prevLock.consecutiveBleedingTicks || 0 : 0;
+        const consecutiveBleedingTicks = prevTicks + 1;
+
+        const lockObj = {
+          lastDetectedTime: Date.now(),
+          lastDetectedIndex: activeSnapshots.length - 1,
+          attackers: mappedAttackers,
+          bleedScore: Math.min(100, scoreData.rawScore),
+          bleedReason: scoreData.reasons.join(' | ') || 'Detected bleeding target',
+          consecutiveBleedingTicks,
+        };
+
+        if (!viewHistoryMode) {
+          newBleedingLocks.set(clan.id, lockObj);
+        }
+
+        // If this target is gaining but bleeding (e.g. slow gainer or fighting back)
+        if (gainingClanIds.has(clan.id)) {
+          const attackerData = attackerTargetMap.get(clan.id);
+          const inferredYield = attackerData?.bracket?.yield;
+          const inferredRange = attackerData?.range;
+          const inferredBracketLabel = attackerData?.bracket?.label;
+
           return {
             ...clan,
             ...thresholdFields,
@@ -1439,40 +1446,67 @@ function App() {
           };
         }
 
-        // If not actively detected, but was previously locked as a slow-gainer (or stagnant) bleed target,
-        // evaluate cooldown exit condition
-        const wasBleedingLocked = activeBleedingLocks.current.has(clan.id);
-        if (wasBleedingLocked) {
-          const lockInfo = activeBleedingLocks.current.get(clan.id);
-          const lastDetectedTime = lockInfo && typeof lockInfo === 'object' ? lockInfo.lastDetectedTime : Date.now();
-          const lastDetectedIndex = lockInfo && typeof lockInfo === 'object' ? lockInfo.lastDetectedIndex : activeSnapshots.length - 1;
-          const lastAttackers = lockInfo && typeof lockInfo === 'object' ? lockInfo.attackers : [];
-          const lastScore = lockInfo && typeof lockInfo === 'object' ? lockInfo.bleedScore : 50;
-          const lastReason = lockInfo && typeof lockInfo === 'object' ? lockInfo.bleedReason : 'Locked — slow gainer';
+        return {
+          ...clan,
+          ...thresholdFields,
+          isBleeding: true,
+          bleedAttackers: mappedAttackers,
+          bleedScore: lockObj.bleedScore,
+          bleedReason: lockObj.bleedReason,
+        };
+      }
 
-          const secondsElapsed = (Date.now() - lastDetectedTime) / 1000;
-          const ticksElapsed = activeSnapshots.length - 1 - lastDetectedIndex;
+      // 2. Not detected bleeding this tick, check previous lock cooldown and recovery
+      if (wasBleedingLocked) {
+        const lockInfo = activeBleedingLocks.current.get(clan.id);
+        const lastDetectedTime = lockInfo && typeof lockInfo === 'object' ? lockInfo.lastDetectedTime : Date.now();
+        const lastDetectedIndex = lockInfo && typeof lockInfo === 'object' ? lockInfo.lastDetectedIndex : activeSnapshots.length - 1;
+        const lastAttackers = lockInfo && typeof lockInfo === 'object' ? lockInfo.attackers : [];
+        const lastScore = lockInfo && typeof lockInfo === 'object' ? lockInfo.bleedScore : 50;
+        const lastReason = lockInfo && typeof lockInfo === 'object' ? lockInfo.bleedReason : 'Locked';
+        const consecutiveBleedingTicks = lockInfo && typeof lockInfo === 'object' ? lockInfo.consecutiveBleedingTicks || 1 : 1;
 
-          const cooldownExpired = secondsElapsed >= ANALYSIS_CONFIG.BLEED_PERSISTENCE_DURATION &&
-                                  ticksElapsed >= ANALYSIS_CONFIG.BLEED_PERSISTENCE_TICKS;
-          
-          // Recovery check for slow gainers: unlock immediately if current rate is above the slow gainer threshold
-          const currentRate = computeGainPerActiveMember(clan);
-          const showsRecovery = currentRate > medianGainRate * ANALYSIS_CONFIG.SLOW_GAINER_THRESHOLD;
+        const secondsElapsed = (Date.now() - lastDetectedTime) / 1000;
+        const ticksElapsed = activeSnapshots.length - 1 - lastDetectedIndex;
 
-          const shouldUnlock = cooldownExpired || showsRecovery;
+        let cooldownExpired = false;
+        let showsRecovery = false;
 
-          if (!shouldUnlock) {
-            const retainedLockObj = {
-              lastDetectedTime,
-              lastDetectedIndex,
-              attackers: lastAttackers,
-              bleedScore: lastScore,
-              bleedReason: lastReason,
-            };
-            if (!viewHistoryMode) {
-              newBleedingLocks.set(clan.id, retainedLockObj);
-            }
+        if (consecutiveBleedingTicks >= ANALYSIS_CONFIG.LONG_TERM_BLEED_TICKS) {
+          // Long-term target cooldown: 60 seconds (20 ticks) and strict recovery check
+          cooldownExpired = secondsElapsed >= ANALYSIS_CONFIG.LONG_TERM_PERSISTENCE_DURATION &&
+                            ticksElapsed >= ANALYSIS_CONFIG.LONG_TERM_PERSISTENCE_TICKS;
+          showsRecovery = clan.tickGain > 0 && 
+                          clan.normalizedActivity >= ANALYSIS_CONFIG.LONG_TERM_RECOVERY_ACTIVITY && 
+                          clan.gain > ANALYSIS_CONFIG.LONG_TERM_RECOVERY_GAIN;
+        } else {
+          // Short-term target cooldown: 30 seconds (10 ticks) and standard recovery check
+          cooldownExpired = secondsElapsed >= ANALYSIS_CONFIG.BLEED_PERSISTENCE_DURATION &&
+                            ticksElapsed >= ANALYSIS_CONFIG.BLEED_PERSISTENCE_TICKS;
+          showsRecovery = clan.tickGain > 0 && clan.normalizedActivity >= 0.2;
+        }
+
+        const shouldUnlock = cooldownExpired || showsRecovery;
+
+        if (!shouldUnlock) {
+          const retainedLockObj = {
+            lastDetectedTime,
+            lastDetectedIndex,
+            attackers: lastAttackers,
+            bleedScore: lastScore,
+            bleedReason: lastReason,
+            consecutiveBleedingTicks,
+          };
+          if (!viewHistoryMode) {
+            newBleedingLocks.set(clan.id, retainedLockObj);
+          }
+
+          if (gainingClanIds.has(clan.id)) {
+            const attackerData = attackerTargetMap.get(clan.id);
+            const inferredYield = attackerData?.bracket?.yield;
+            const inferredRange = attackerData?.range;
+            const inferredBracketLabel = attackerData?.bracket?.label;
+
             return {
               ...clan,
               ...thresholdFields,
@@ -1485,7 +1519,24 @@ function App() {
               bleedReason: lastReason,
             };
           }
+
+          return {
+            ...clan,
+            ...thresholdFields,
+            isBleeding: true,
+            bleedAttackers: lastAttackers,
+            bleedScore: lastScore,
+            bleedReason: lastReason,
+          };
         }
+      }
+
+      // 3. Stable (not bleeding)
+      if (gainingClanIds.has(clan.id)) {
+        const attackerData = attackerTargetMap.get(clan.id);
+        const inferredYield = attackerData?.bracket?.yield;
+        const inferredRange = attackerData?.range;
+        const inferredBracketLabel = attackerData?.bracket?.label;
 
         return {
           ...clan,
@@ -1498,85 +1549,6 @@ function App() {
           bleedScore: 0,
           bleedReason: 'Stable',
         };
-      }
-
-      const scoreData = clanRawScores.get(clan.id);
-      const wasBleedingLocked = activeBleedingLocks.current.has(clan.id);
-
-      if (scoreData && scoreData.rawScore >= ANALYSIS_CONFIG.MIN_BLEED_SCORE) {
-        const mappedAttackers = scoreData.attackers.map(a => {
-          const aData = attackerTargetMap.get(a.id);
-          return {
-            ...a,
-            inferredYield: aData?.bracket?.yield,
-            inferredRange: aData?.range,
-            inferredBracketLabel: aData?.bracket?.label,
-          };
-        });
-
-        // Actively detected as bleeding this tick — lock it in
-        const lockObj = {
-          lastDetectedTime: Date.now(),
-          lastDetectedIndex: activeSnapshots.length - 1,
-          attackers: mappedAttackers,
-          bleedScore: Math.min(100, scoreData.rawScore),
-          bleedReason: scoreData.reasons.join(' | ') || 'Stagnant target',
-        };
-        if (!viewHistoryMode) {
-          newBleedingLocks.set(clan.id, lockObj);
-        }
-        return {
-          ...clan,
-          ...thresholdFields,
-          isBleeding: true,
-          bleedAttackers: mappedAttackers,
-          bleedScore: lockObj.bleedScore,
-          bleedReason: lockObj.bleedReason,
-        };
-      }
-
-      if (wasBleedingLocked) {
-        // Was bleeding before but not detected this tick.
-        // Keep it locked as bleeding UNLESS the clan shows strong recovery
-        // OR the cooldown has expired.
-        const lockInfo = activeBleedingLocks.current.get(clan.id);
-        const lastDetectedTime = lockInfo && typeof lockInfo === 'object' ? lockInfo.lastDetectedTime : Date.now();
-        const lastDetectedIndex = lockInfo && typeof lockInfo === 'object' ? lockInfo.lastDetectedIndex : activeSnapshots.length - 1;
-        const lastAttackers = lockInfo && typeof lockInfo === 'object' ? lockInfo.attackers : [];
-        const lastScore = lockInfo && typeof lockInfo === 'object' ? lockInfo.bleedScore : 50;
-        const lastReason = lockInfo && typeof lockInfo === 'object' ? lockInfo.bleedReason : 'Locked — sustained stagnancy across reset';
-
-        const secondsElapsed = (Date.now() - lastDetectedTime) / 1000;
-        const ticksElapsed = activeSnapshots.length - 1 - lastDetectedIndex;
-
-        const cooldownExpired = secondsElapsed >= ANALYSIS_CONFIG.BLEED_PERSISTENCE_DURATION &&
-                                ticksElapsed >= ANALYSIS_CONFIG.BLEED_PERSISTENCE_TICKS;
-        
-        // Stagnant clan recovers if it has tick gain AND normalized activity is positive
-        const showsRecovery = clan.tickGain > 0 && clan.normalizedActivity >= 0.2;
-
-        const shouldUnlock = cooldownExpired || showsRecovery;
-
-        if (!shouldUnlock) {
-          const retainedLockObj = {
-            lastDetectedTime,
-            lastDetectedIndex,
-            attackers: lastAttackers,
-            bleedScore: lastScore,
-            bleedReason: lastReason,
-          };
-          if (!viewHistoryMode) {
-            newBleedingLocks.set(clan.id, retainedLockObj);
-          }
-          return {
-            ...clan,
-            ...thresholdFields,
-            isBleeding: true,
-            bleedAttackers: lastAttackers,
-            bleedScore: lastScore,
-            bleedReason: lastReason,
-          };
-        }
       }
 
       return {
@@ -1709,7 +1681,6 @@ function App() {
 
       // Decrement Auto-Poll Countdown
       if (isAutoPolling) {
-        setHighSpeedTicksRemaining(prev => Math.max(0, prev - 1));
         setTimeToNextPoll(prev => {
           if (prev <= 1) {
             // Only trigger auto-poll if we are not in the grace period
@@ -1761,19 +1732,10 @@ function App() {
     // Update ref for next tick
     prevBleedingIdsRef.current = currBleedingIds;
 
-    if (newBleeds.length > 0) {
-      // New bleeding clan detected! 1s burst for 5 ticks to capture per-member
-      // rep changes (needed for yield bracket inference). After that, the
-      // hysteresis + weighted analysis has enough data and we slow down.
-      setHighSpeedTicksRemaining(5);
-      desiredInterval = 1;
-    } else if (highSpeedTicksRemaining > 0) {
-      // Still in the 1s member-data capture burst
-      desiredInterval = 1;
-    } else if (isGaining || currBleedingIds.length > 0) {
-      // Active scenario (gaining or established bleeds) — 5s monitoring
+    if (isGaining || currBleedingIds.length > 0) {
+      // Active scenario (gaining or established bleeds) — 3s monitoring
       // is fast enough to track changes without hammering the API
-      desiredInterval = 5;
+      desiredInterval = 3;
     } else {
       // Standby — nothing happening, check every 60s
       desiredInterval = 60;
@@ -1817,7 +1779,7 @@ function App() {
         }
       }
     }
-  }, [rankings, targetClanId, snapshots, highSpeedTicksRemaining, pollingInterval, lastNotifiedTime, enableSound, enableNotifications, notifyGaining, notifyBleeding, bleedAnalysis]);
+  }, [rankings, targetClanId, snapshots, pollingInterval, lastNotifiedTime, enableSound, enableNotifications, notifyGaining, notifyBleeding, bleedAnalysis]);
 
   // Filtered Leaderboard for the rankings view
   const filteredLeaderboard = useMemo(() => {
@@ -1853,10 +1815,19 @@ function App() {
         if (b.bleedYield !== a.bleedYield) {
           return b.bleedYield - a.bleedYield;
         }
+        if (b.bleedScore !== a.bleedScore) {
+          return b.bleedScore - a.bleedScore;
+        }
         return a.rank - b.rank; // show stronger ones first
       })
       .slice(0, 5);
   }, [bleedAnalysis, targetClanId]);
+
+  // Live updated data for the inspecting clan modal
+  const liveInspectingClan = useMemo(() => {
+    if (!inspectingClan) return null;
+    return bleedAnalysis.find(c => c.id === inspectingClan.id) || inspectingClan;
+  }, [bleedAnalysis, inspectingClan]);
 
   // Competitive standings details (forecasting shifts)
   const competitiveData = useMemo(() => {
@@ -2982,7 +2953,7 @@ function App() {
                     <th>Clan Name</th>
                     <th className="hide-mobile">Master</th>
                     <th>Total Reputation</th>
-                    <th>Gain (Snapshot)</th>
+                    <th>Gain (Reset)</th>
                     <th className="hide-mobile">Inactive roster</th>
                     <th>State</th>
                     <th className="hide-mobile">Bleed Score</th>
@@ -3513,12 +3484,12 @@ function App() {
     </div>
 
       {/* Clan Inspection Modal */}
-      {inspectingClan && (
+      {inspectingClan && liveInspectingClan && (
         <div className="modal-backdrop" onClick={() => setInspectingClan(null)}>
           <div className="modal-container" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="text-glow-water" style={{ margin: 0, fontSize: '1.25rem' }}>
-                RANK #{inspectingClan.rank}: {inspectingClan.name}
+                RANK #{liveInspectingClan.rank}: {liveInspectingClan.name}
               </h3>
               <button 
                 className="btn-secondary" 
@@ -3533,24 +3504,24 @@ function App() {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem' }}>
                 <div className="glass-card" style={{ padding: '0.75rem 1rem', background: 'var(--bg-tertiary)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>CLAN MASTER</div>
-                  <strong style={{ fontSize: '1rem', color: 'var(--color-earth)' }}>{inspectingClan.master}</strong>
+                  <strong style={{ fontSize: '1rem', color: 'var(--color-earth)' }}>{liveInspectingClan.master}</strong>
                 </div>
                 <div className="glass-card" style={{ padding: '0.75rem 1rem', background: 'var(--bg-tertiary)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>TOTAL REPUTATION</div>
                   <strong className="text-number" style={{ fontSize: '1rem', color: 'var(--text-primary)' }}>
-                    {inspectingClan.reputation.toLocaleString()}
+                    {liveInspectingClan.reputation.toLocaleString()}
                   </strong>
                 </div>
                 <div className="glass-card" style={{ padding: '0.75rem 1rem', background: 'var(--bg-tertiary)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>ROSTER SIZE</div>
                   <strong style={{ fontSize: '1rem', color: 'var(--color-water)' }}>
-                    {inspectingClan.members || inspectingClan.member_list?.length || 0} / 40
+                    {liveInspectingClan.members || liveInspectingClan.member_list?.length || 0} / 40
                   </strong>
                 </div>
                 <div className="glass-card" style={{ padding: '0.75rem 1rem', background: 'var(--bg-tertiary)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>INACTIVE MEMBERS</div>
-                  <strong style={{ fontSize: '1rem', color: inspectingClan.inactivePercent > 25 ? 'var(--color-fire)' : 'var(--text-primary)' }}>
-                    {inspectingClan.inactiveCount || 0} ({(inspectingClan.inactivePercent || 0).toFixed(2)}%)
+                  <strong style={{ fontSize: '1rem', color: liveInspectingClan.inactivePercent > 25 ? 'var(--color-fire)' : 'var(--text-primary)' }}>
+                    {liveInspectingClan.inactiveCount || 0} ({(liveInspectingClan.inactivePercent || 0).toFixed(2)}%)
                   </strong>
                 </div>
               </div>
@@ -3570,8 +3541,8 @@ function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {((inspectingClan.member_list || []).slice().sort((a, b) => b.reputation - a.reputation)).map((m, idx) => {
-                        const baselineClan = activeSnapshots[0]?.clans?.find(c => c.id === inspectingClan.id);
+                      {((liveInspectingClan.member_list || []).slice().sort((a, b) => b.reputation - a.reputation)).map((m, idx) => {
+                        const baselineClan = activeSnapshots[0]?.clans?.find(c => c.id === liveInspectingClan.id);
                         const baselineMember = baselineClan?.member_list?.find(bm => bm.id === m.id);
                         const memberResetGain = baselineMember ? (m.reputation - baselineMember.reputation) : 0;
                         
@@ -3601,7 +3572,7 @@ function App() {
                           </tr>
                         );
                       })}
-                      {(!inspectingClan.member_list || inspectingClan.member_list.length === 0) && (
+                      {(!liveInspectingClan.member_list || liveInspectingClan.member_list.length === 0) && (
                         <tr>
                           <td colSpan="5" style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
                             No member list data available.

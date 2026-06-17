@@ -67,13 +67,20 @@ export const ANALYSIS_CONFIG = {
   // Maximum bleed score for slow-gainer candidates (medium confidence cap).
   // Lower than the 100-point ceiling for stagnant bleed candidates because
   // the signal is inherently weaker when the clan IS still gaining.
-  SLOW_GAINER_MAX_SCORE: 60,
+  SLOW_GAINER_MAX_SCORE: 85,
 
   // ── Bleeding status persistence ──
   // A clan marked as bleeding remains locked as bleeding for at least this long
   // to prevent flickering during 1s/5s polling when attackers temporarily pause.
   BLEED_PERSISTENCE_DURATION: 30, // minimum seconds to persist bleeding status
   BLEED_PERSISTENCE_TICKS: 10,     // minimum snapshots/ticks to persist bleeding status
+
+  // ── Long-term bleed target hysteresis config ──
+  LONG_TERM_BLEED_TICKS: 5,         // ticks to qualify as a long-term target
+  LONG_TERM_PERSISTENCE_DURATION: 60, // extended cooldown in seconds
+  LONG_TERM_PERSISTENCE_TICKS: 20,    // extended cooldown in snapshots/ticks
+  LONG_TERM_RECOVERY_ACTIVITY: 0.35,  // minimum normalized activity to unlock
+  LONG_TERM_RECOVERY_GAIN: 150,       // minimum cumulative reset gain to unlock
 
   // ── Bleeding target narrowing and thresholding ──
   MIN_BLEED_SCORE: 50,             // minimum score to qualify as bleeding
