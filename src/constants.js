@@ -82,9 +82,12 @@ export const ANALYSIS_CONFIG = {
   LONG_TERM_RECOVERY_ACTIVITY: 0.35,  // minimum normalized activity to unlock
   LONG_TERM_RECOVERY_GAIN: 150,       // minimum cumulative reset gain to unlock
 
+  // ── Adaptive Polling Configuration (seconds) ──
+  ACTIVE_POLLING_INTERVAL: 1,
+  STANDBY_POLLING_INTERVAL: 60,
+
   // ── Bleeding target narrowing and thresholding ──
   MIN_BLEED_SCORE: 50,             // minimum score to qualify as bleeding
   VELOCITY_TIE_MARGIN: 10,         // velocity margin (rep/tick) to consider stagnant targets tied
   SLOW_GAINER_TIE_MARGIN: 0.1,     // percentage margin (10%) to consider slow gainers tied
 };
-

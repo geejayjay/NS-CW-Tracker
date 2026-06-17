@@ -139,8 +139,8 @@ function App() {
   
   // Adaptive Polling States
   const [isAutoPolling, setIsAutoPolling] = useState(true);
-  const [pollingInterval, setPollingInterval] = useState(60); // standby: 60s, active: 3s
-  const [timeToNextPoll, setTimeToNextPoll] = useState(60); // countdown
+  const [pollingInterval, setPollingInterval] = useState(ANALYSIS_CONFIG.STANDBY_POLLING_INTERVAL);
+  const [timeToNextPoll, setTimeToNextPoll] = useState(ANALYSIS_CONFIG.STANDBY_POLLING_INTERVAL);
   const [consecutiveStagnantTicks, setConsecutiveStagnantTicks] = useState(0);
   const [simulationMode, setSimulationMode] = useState(() => {
     const isSimEnabled = import.meta.env.VITE_ENABLE_SIMULATION === 'true';
@@ -959,8 +959,9 @@ function App() {
       }
 
       const latestSnapshot = activeSnapshots[activeSnapshots.length - 1];
-      // Compare latest snapshot with snapshot 3 ticks ago for stability
-      const prevSnapshotIndex = Math.max(0, activeSnapshots.length - 1 - 3);
+      // Dynamically calculate ticks needed to cover a ~9-second comparison window for stability
+      const ticksToCompare = Math.max(1, Math.ceil(9 / (ANALYSIS_CONFIG.ACTIVE_POLLING_INTERVAL || 3)));
+      const prevSnapshotIndex = Math.max(0, activeSnapshots.length - 1 - ticksToCompare);
       const prevSnapshot = activeSnapshots[prevSnapshotIndex];
 
       const attackerLatest = latestSnapshot.clans.find(c => c.id === attacker.id);
@@ -1714,7 +1715,7 @@ function App() {
     const prevSnapshot = snapshots[snapshots.length - 2];
     const prevClan = prevSnapshot ? prevSnapshot.clans.find(c => c.id === targetClanId) : null;
 
-    let desiredInterval = 60; // standard 60 seconds
+    let desiredInterval = ANALYSIS_CONFIG.STANDBY_POLLING_INTERVAL;
     let isGaining = false;
 
     if (currentClan && prevClan) {
@@ -1736,12 +1737,11 @@ function App() {
     prevBleedingIdsRef.current = currBleedingIds;
 
     if (isGaining || currBleedingIds.length > 0) {
-      // Active scenario (gaining or established bleeds) — 3s monitoring
-      // is fast enough to track changes without hammering the API
-      desiredInterval = 3;
+      // Active scenario (gaining or established bleeds)
+      desiredInterval = ANALYSIS_CONFIG.ACTIVE_POLLING_INTERVAL;
     } else {
-      // Standby — nothing happening, check every 60s
-      desiredInterval = 60;
+      // Standby — nothing happening
+      desiredInterval = ANALYSIS_CONFIG.STANDBY_POLLING_INTERVAL;
     }
 
     if (pollingInterval !== desiredInterval) {
@@ -2417,10 +2417,10 @@ function App() {
       <section className="glass-card" style={{ marginBottom: '1.5rem', padding: '1rem', border: '1px solid var(--border-color)', display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem', flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: isAutoPolling ? 'var(--color-wind)' : 'var(--text-muted)', display: 'inline-block' }} className={pollingInterval <= 10 && isAutoPolling ? 'bleeding-pulse' : ''}></div>
+            <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: isAutoPolling ? 'var(--color-wind)' : 'var(--text-muted)', display: 'inline-block' }} className={pollingInterval === ANALYSIS_CONFIG.ACTIVE_POLLING_INTERVAL && isAutoPolling ? 'bleeding-pulse' : ''}></div>
             <div>
               <span style={{ fontSize: '0.9rem', fontWeight: 'bold', fontFamily: 'var(--font-gaming)' }}>
-                {pollingInterval === 1 ? '🚀 HIGH-SPEED DETECTION' : pollingInterval <= 10 ? '🔥 ACTIVE POLLING MODE' : '💤 STANDBY POLLING MODE'}
+                {pollingInterval === ANALYSIS_CONFIG.ACTIVE_POLLING_INTERVAL ? '🔥 ACTIVE POLLING MODE' : '💤 STANDBY POLLING MODE'}
               </span>
               <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginLeft: '0.5rem' }}>
                 ({pollingInterval}s interval)
@@ -2558,7 +2558,7 @@ function App() {
                           🔴 Bleed Analysis
                         </div>
                         <div style={{ marginBottom: '0.3rem' }}>
-                          <strong>Score:</strong> {c.bleedScore}/100
+                          <strong>Score:</strong> {c.bleedScore.toFixed(2)}/100
                         </div>
                         <div style={{ marginBottom: '0.3rem' }}>
                           <strong>Reason:</strong> {c.bleedReason}
@@ -2591,7 +2591,7 @@ function App() {
                         color: c.bleedScore >= 70 ? 'var(--color-fire)' : c.bleedScore >= 40 ? 'var(--color-earth)' : 'var(--text-secondary)',
                       }}
                     >
-                      {c.bleedScore}/100
+                      {c.bleedScore.toFixed(2)}/100
                     </span>
                     <span className="bleed-info-tooltip">
                       <span 
@@ -3014,7 +3014,7 @@ function App() {
                                       🔴 Bleed Analysis
                                     </div>
                                     <div style={{ marginBottom: '0.3rem' }}>
-                                      <strong>Score:</strong> {c.bleedScore}/100
+                                      <strong>Score:</strong> {c.bleedScore.toFixed(2)}/100
                                     </div>
                                     <div style={{ marginBottom: '0.3rem' }}>
                                       <strong>Reason:</strong> {c.bleedReason}
@@ -3089,7 +3089,7 @@ function App() {
                                   fontSize: '0.9rem',
                                   color: c.bleedScore >= 70 ? 'var(--color-fire)' : c.bleedScore >= 40 ? 'var(--color-earth)' : 'var(--text-secondary)'
                                 }}>
-                                  {c.bleedScore}
+                                  {c.bleedScore.toFixed(2)}
                                 </span>
                                 <div className="progress-bar-bg" style={{ flexGrow: 1, height: '6px' }}>
                                   <div className="progress-bar-fill" style={{ 
