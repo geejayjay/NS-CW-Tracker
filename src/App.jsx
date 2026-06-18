@@ -1091,7 +1091,7 @@ function App() {
     const gainingClanIds = new Set(activelyGainingClans.map(c => c.id));
 
     // ── Pass 1: For each attacker, infer target range and find matching clans ──
-    const attackerTargetMap = new Map(); // attackerId → { bracket, range, matchingClans[] }
+    const attackerTargetMap = new Map(); // attackerId → { bracket, range, matchingClans[], candidatesInRange[] }
 
     activelyGainingClans.forEach(attacker => {
       const bracket = inferYieldBracket(attacker);
@@ -1126,6 +1126,7 @@ function App() {
         bracket,
         range,
         matchingClans: bestMatchingClans,
+        candidatesInRange,
         attackerName: attacker.name,
         attackerRep: attacker.reputation,
         attackerGain: attacker.gain,
@@ -1256,148 +1257,166 @@ function App() {
       const isSlowGainer = slowGainerCandidates.has(clan.id);
       if (matchingAttackers.length === 0 && !isSlowGainer) return;
 
-      let rawScore = 0;
+      let maxScore = 0;
       let reasons = [];
-      let isPrimaryForAny = false;
       const attackerDetails = [];
+      let isPrimary = false;
 
-      // ── Factor 1: Position in inferred target range per attacker & velocity gap ──
-      matchingAttackers.forEach(({ bracket, positionInList, totalInList, attackerName, attackerVelocity }) => {
-        attackerDetails.push(activelyGainingClans.find(a => a.name === attackerName));
+      // ── Calculate score and reasons for each matching attacker ──
+      const attackerScores = matchingAttackers.map(ma => {
+        const { attackerId, bracket, positionInList, attackerName, attackerVelocity } = ma;
+        const attackerData = attackerTargetMap.get(attackerId);
+        const candidatesInRange = attackerData ? attackerData.candidatesInRange : [];
+        const zeroGainCandidates = candidatesInRange.filter(c => c.gain <= 0);
+        const veryLowGainThreshold = ANALYSIS_CONFIG.VERY_LOW_GAIN_THRESHOLD || 5;
+        const veryLowGainCandidates = candidatesInRange.filter(c => c.gain <= veryLowGainThreshold);
+        const isPrimaryForThisAttacker = (positionInList === 0);
 
-        // #1 match in range gets 30 points, decreasing for later positions
-        const positionScore = Math.max(5, 30 - (positionInList / Math.max(1, totalInList - 1)) * 25);
-        rawScore += positionScore;
+        let pairScore = 0;
+        let pairReasons = [];
 
-        if (positionInList === 0) {
-          isPrimaryForAny = true;
-          reasons.push(`⚡ Primary target for ${attackerName} (${bracket.label})`);
+        if (clan.gain <= 0) {
+          if (zeroGainCandidates.length === 1) {
+            pairScore = 100;
+            pairReasons.push(`🎯 100% Sure: Only clan in range of ${attackerName} with zero gain entire reset`);
+          } else {
+            if (isPrimaryForThisAttacker) {
+              pairScore = 95;
+              pairReasons.push(`🔥 High Confidence (95%): Primary target for ${attackerName} with zero gain entire reset`);
+            } else {
+              pairScore = 90;
+              pairReasons.push(`⚡ High Confidence (90%): Zero gain entire reset, in range of ${attackerName}`);
+            }
+          }
+        } else if (clan.gain <= veryLowGainThreshold) {
+          if (veryLowGainCandidates.length === 1) {
+            pairScore = 100;
+            pairReasons.push(`🎯 100% Sure: Only clan in range of ${attackerName} with very low gain (+${clan.gain}) entire reset`);
+          } else {
+            if (isPrimaryForThisAttacker) {
+              pairScore = 95;
+              pairReasons.push(`🔥 High Confidence (95%): Primary target for ${attackerName} with very low gain (+${clan.gain}) entire reset`);
+            } else {
+              pairScore = 90;
+              pairReasons.push(`⚡ High Confidence (90%): Very low gain (+${clan.gain}) entire reset, in range of ${attackerName}`);
+            }
+          }
         } else {
-          reasons.push(`In range of ${attackerName} (${bracket.label})`);
+          // ambiguous positive gain bleed candidate
+          let base = isPrimaryForThisAttacker ? 70 : 55;
+          pairReasons.push(isPrimaryForThisAttacker 
+            ? `Primary candidate for ${attackerName} (${bracket.label})`
+            : `In range of ${attackerName} (${bracket.label})`
+          );
+
+          // Velocity Gap
+          const velocityGap = attackerVelocity - clan.avgWeightedVelocity;
+          if (velocityGap > 100) {
+            base += 15;
+            pairReasons.push(`Significant velocity gap vs ${attackerName} (+${Math.round(velocityGap)}/tick)`);
+          } else if (velocityGap > 50) {
+            base += 8;
+            pairReasons.push(`Moderate velocity gap vs ${attackerName} (+${Math.round(velocityGap)}/tick)`);
+          }
+
+          // Absolute Velocity
+          if (clan.avgWeightedVelocity <= -50) {
+            base += 15;
+            pairReasons.push(`Strong rep loss (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
+          } else if (clan.avgWeightedVelocity <= 0) {
+            base += 10;
+            pairReasons.push(`Stagnant/losing (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
+          } else if (clan.avgWeightedVelocity <= 30) {
+            base += 5;
+            pairReasons.push(`Very low velocity (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
+          }
+
+          // Activity
+          if (clan.normalizedActivity <= -0.3) {
+            base += 10;
+            pairReasons.push(`Deeply stagnant (weighted)`);
+          } else if (clan.normalizedActivity <= -0.1) {
+            base += 5;
+            pairReasons.push(`Stagnant (weighted)`);
+          }
+
+          pairScore = Math.min(ANALYSIS_CONFIG.MAX_AMBIGUOUS_BLEED_SCORE || 89, base);
         }
 
-        // Velocity gap relative to attacker
-        const velocityGap = attackerVelocity - clan.avgWeightedVelocity;
-        if (velocityGap > 100) {
-          rawScore += 15;
-          reasons.push(`Significant velocity gap vs ${attackerName} (+${Math.round(velocityGap)}/tick)`);
-        } else if (velocityGap > 50) {
-          rawScore += 8;
-          reasons.push(`Moderate velocity gap vs ${attackerName} (+${Math.round(velocityGap)}/tick)`);
-        }
+        return {
+          attackerName,
+          pairScore,
+          pairReasons,
+          isPrimary: isPrimaryForThisAttacker,
+          attackerDetail: activelyGainingClans.find(a => a.id === attackerId)
+        };
       });
 
-      // ── Factor 2: Absolute velocity across multiple snapshots ──
-      if (clan.avgWeightedVelocity <= -50) {
-        rawScore += 25;
-        reasons.push(`Strong rep loss (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
-      } else if (clan.avgWeightedVelocity <= 0) {
-        rawScore += 20;
-        reasons.push(`Stagnant/losing (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
-      } else if (clan.avgWeightedVelocity <= 30) {
-        rawScore += 12;
-        reasons.push(`Very low velocity (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
-      } else if (clan.avgWeightedVelocity <= 80) {
-        rawScore += 5;
-        reasons.push(`Low velocity (${Math.round(clan.avgWeightedVelocity)}/tick avg)`);
+      // Find the best attacker score matching
+      let bestMatch = null;
+      if (attackerScores.length > 0) {
+        // Sort by score descending, then primary target first
+        attackerScores.sort((a, b) => {
+          if (b.pairScore !== a.pairScore) return b.pairScore - a.pairScore;
+          return (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0);
+        });
+        bestMatch = attackerScores[0];
+        maxScore = bestMatch.pairScore;
+        reasons = [...bestMatch.pairReasons];
+        isPrimary = bestMatch.isPrimary;
+        
+        attackerScores.forEach(as => {
+          if (as.attackerDetail) {
+            attackerDetails.push(as.attackerDetail);
+          }
+        });
       }
 
-      // ── Factor 3: Cumulative gain since reset ──
-      if (clan.gain <= 0) {
-        rawScore += 15;
-        reasons.push("No cumulative gain since reset");
-      } else if (clan.gain < 100) {
-        rawScore += 8;
-        reasons.push(`Very low cumulative gain (+${clan.gain})`);
+      // Add "Also targeted by..." reasons for secondary attackers
+      if (attackerScores.length > 1) {
+        const otherAttackers = attackerScores.slice(1).map(as => as.attackerName);
+        reasons.push(`Also in range of: ${otherAttackers.join(', ')}`);
+        // Small score bump for multiple attackers targeting the same clan (only if not already 100/95/90)
+        if (maxScore < 90) {
+          maxScore = Math.min(ANALYSIS_CONFIG.MAX_AMBIGUOUS_BLEED_SCORE || 89, maxScore + (attackerScores.length - 1) * 3);
+        }
       }
 
-      // ── Factor 4: Weighted activity depth ──
-      if (clan.normalizedActivity <= -0.3) {
-        rawScore += 10;
-        reasons.push("Deeply stagnant (weighted)");
-      } else if (clan.normalizedActivity <= -0.1) {
-        rawScore += 5;
-        reasons.push("Stagnant (weighted)");
-      }
-
-      // ── Factor 5: Multiple attackers targeting same clan ──
-      if (matchingAttackers.length >= 3) {
-        rawScore += 8;
-        reasons.push(`Targeted by ${matchingAttackers.length} attackers`);
-      } else if (matchingAttackers.length >= 2) {
-        rawScore += 4;
-        reasons.push(`Targeted by ${matchingAttackers.length} attackers`);
-      }
-
-      // ── Factor 6: Slow-gainer detection (gaining-but-bleeding) ──
+      // Slow Gainer candidate handling
       if (isSlowGainer) {
         const sgData = slowGainerCandidates.get(clan.id);
         const ratioPercent = Math.round(sgData.ratio * 100);
+        let slowGainerScore = sgData.ratio <= 0.25 ? 80 : 70;
+        let slowGainerReason = sgData.ratio <= 0.25 
+          ? `🐌 Very slow gainer (${ratioPercent}% of median rate)` 
+          : `🐌 Slow gainer (${ratioPercent}% of median rate)`;
 
-        if (sgData.ratio <= 0.25) {
-          rawScore += 20;
-          reasons.push(`🐌 Very slow gainer (${ratioPercent}% of median rate)`);
+        if (slowGainerScore > maxScore) {
+          maxScore = slowGainerScore;
+          reasons.unshift(slowGainerReason);
         } else {
-          rawScore += 12;
-          reasons.push(`🐌 Slow gainer (${ratioPercent}% of median rate)`);
+          reasons.push(slowGainerReason);
         }
 
         sgData.attackers.forEach(({ attackerName, bracket }) => {
           const alreadyListed = matchingAttackers.some(a => a.attackerName === attackerName);
           if (!alreadyListed) {
-            attackerDetails.push(activelyGainingClans.find(a => a.name === attackerName));
-            reasons.push(`In range of ${attackerName} (${bracket.label}) — slow gainer`);
+            const att = activelyGainingClans.find(a => a.name === attackerName);
+            if (att) {
+              attackerDetails.push(att);
+              reasons.push(`In range of ${attackerName} (${bracket.label}) — slow gainer`);
+            }
           }
         });
-
-        // Cap score for gaining clans to protect against noise, but high enough to flag
-        rawScore = Math.min(rawScore, ANALYSIS_CONFIG.SLOW_GAINER_MAX_SCORE);
       }
 
       clanRawScores.set(clan.id, {
-        rawScore,
+        rawScore: maxScore,
         reasons,
         attackers: attackerDetails.filter(Boolean),
-        isPrimary: isPrimaryForAny,
+        isPrimary,
         velocity: clan.avgWeightedVelocity,
       });
-    });
-
-    // ── Pass 3: Cross-context suppression ──
-    attackerTargetMap.forEach((data) => {
-      const { matchingClans } = data;
-      if (matchingClans.length < 2) return;
-
-      const primaryVictim = matchingClans[0]; // lowest velocity
-      const secondVictim = matchingClans[1];
-
-      const velocityGap = secondVictim.velocity - primaryVictim.velocity;
-      const isClearPrimary = velocityGap > 50 || (primaryVictim.velocity <= 0 && secondVictim.velocity > 50);
-
-      if (!isClearPrimary) return;
-
-      for (let i = 1; i < matchingClans.length; i++) {
-        const victim = matchingClans[i];
-        const scoreData = clanRawScores.get(victim.clanId);
-        if (!scoreData) continue;
-
-        const relativeVelocity = victim.velocity - primaryVictim.velocity;
-        let suppressionFactor = 1.0;
-        if (relativeVelocity > 200) {
-          suppressionFactor = 0.2;
-        } else if (relativeVelocity > 100) {
-          suppressionFactor = 0.4;
-        } else if (relativeVelocity > 50) {
-          suppressionFactor = 0.6;
-        } else {
-          suppressionFactor = 0.85;
-        }
-
-        scoreData.rawScore = Math.round(scoreData.rawScore * suppressionFactor);
-        if (suppressionFactor < 0.8) {
-          scoreData.reasons.push('Score reduced — clear primary target nearby');
-        }
-      }
     });
 
     // ── Build final results with dynamic lock cooldowns ──

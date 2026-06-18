@@ -90,4 +90,6 @@ export const ANALYSIS_CONFIG = {
   MIN_BLEED_SCORE: 50,             // minimum score to qualify as bleeding
   VELOCITY_TIE_MARGIN: 10,         // velocity margin (rep/tick) to consider stagnant targets tied
   SLOW_GAINER_TIE_MARGIN: 0.1,     // percentage margin (10%) to consider slow gainers tied
+  VERY_LOW_GAIN_THRESHOLD: 5,      // cumulative gain threshold under which a clan has "very low gain"
+  MAX_AMBIGUOUS_BLEED_SCORE: 89,   // maximum score for clans with positive gain to prevent false 90+ scores
 };
