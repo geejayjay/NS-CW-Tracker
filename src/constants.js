@@ -84,7 +84,7 @@ export const ANALYSIS_CONFIG = {
 
   // ── Adaptive Polling Configuration (seconds) ──
   ACTIVE_POLLING_INTERVAL: 2,
-  STANDBY_POLLING_INTERVAL: 60,
+  STANDBY_POLLING_INTERVAL: 30,
 
   // ── Bleeding target narrowing and thresholding ──
   MIN_BLEED_SCORE: 50,             // minimum score to qualify as bleeding
