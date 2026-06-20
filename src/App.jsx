@@ -560,11 +560,6 @@ function App() {
   };
   latestActualReset.current = endGracePeriodAndReset;
 
-  const latestTriggerAutoPoll = React.useRef(triggerAutoPoll);
-  useEffect(() => {
-    latestTriggerAutoPoll.current = triggerAutoPoll;
-  }, [triggerAutoPoll]);
-
 
   const triggerAutoPoll = () => {
     if (simulationMode) {
@@ -573,6 +568,11 @@ function App() {
       pollData();
     }
   };
+
+  const latestTriggerAutoPoll = React.useRef(triggerAutoPoll);
+  useEffect(() => {
+    latestTriggerAutoPoll.current = triggerAutoPoll;
+  }, [triggerAutoPoll]);
 
   // Shared fetch logic — returns the API data without touching loading state
   const fetchRankingsData = async () => {
