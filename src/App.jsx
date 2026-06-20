@@ -61,7 +61,8 @@ const RepRangeTooltip = ({ baseRep, activeYield, targetRep = null, title = "Yiel
           }
 
           let badgeClass = 'badge-secondary';
-          if (b.yield === 15) badgeClass = 'badge-fire text-glow-fire';
+          if (b.yield === 25) badgeClass = 'badge-fire text-glow-fire';
+          else if (b.yield === 15) badgeClass = 'badge-fire text-glow-fire';
           else if (b.yield === 10) badgeClass = 'badge-earth text-glow-earth';
           else if (b.yield === 6) badgeClass = 'badge-water text-glow-water';
           else if (b.yield === 3) badgeClass = 'badge-lightning text-glow-lightning';
@@ -960,28 +961,43 @@ function App() {
     const computeThresholdFields = (clan) => {
       let nextLowerThreshold = null;
       let nextLowerYield = null;
+      let nextHigherThreshold = null;
+      let nextHigherYield = null;
+
       if (clan.diffPercent > 50) {
         nextLowerThreshold = 50;
         nextLowerYield = 15;
       } else if (clan.diffPercent > 25) {
         nextLowerThreshold = 25;
         nextLowerYield = 10;
+        nextHigherThreshold = 50;
+        nextHigherYield = 25;
       } else if (clan.diffPercent > 10) {
         nextLowerThreshold = 10;
         nextLowerYield = 6;
+        nextHigherThreshold = 25;
+        nextHigherYield = 15;
       } else if (clan.diffPercent >= 0) {
         nextLowerThreshold = 0;
         nextLowerYield = 3;
+        nextHigherThreshold = 10;
+        nextHigherYield = 10;
       } else if (clan.diffPercent >= -10) {
         nextLowerThreshold = -10;
         nextLowerYield = 1;
+        nextHigherThreshold = 0;
+        nextHigherYield = 6;
+      } else {
+        nextHigherThreshold = -10;
+        nextHigherYield = 3;
       }
 
       let repNeededToChange = null;
       let timeToChange = null;
+      let targetRepAtThreshold = null;
 
       if (nextLowerThreshold !== null) {
-        const targetRepAtThreshold = Math.ceil(myClanRep * (1 + nextLowerThreshold / 100));
+        targetRepAtThreshold = Math.ceil(myClanRep * (1 + nextLowerThreshold / 100));
         repNeededToChange = clan.reputation - targetRepAtThreshold;
         if (repNeededToChange < 0) repNeededToChange = 0;
 
@@ -1003,7 +1019,26 @@ function App() {
         }
       }
 
-      return { nextLowerThreshold, nextLowerYield, repNeededToChange, timeToChange };
+      let repNeededToGain = null;
+      let targetRepAtHigherThreshold = null;
+
+      if (nextHigherThreshold !== null) {
+        targetRepAtHigherThreshold = Math.ceil(myClanRep * (1 + nextHigherThreshold / 100));
+        repNeededToGain = targetRepAtHigherThreshold - clan.reputation;
+        if (repNeededToGain < 0) repNeededToGain = 0;
+      }
+
+      return { 
+        nextLowerThreshold, 
+        nextLowerYield, 
+        repNeededToChange, 
+        timeToChange, 
+        targetRepAtThreshold,
+        nextHigherThreshold,
+        nextHigherYield,
+        repNeededToGain,
+        targetRepAtHigherThreshold
+      };
     };
 
     // Helper: infer the yield bracket an attacker is likely using.
@@ -2717,7 +2752,7 @@ function App() {
                     <span className="bleed-info-tooltip">
                       <span 
                         className={`badge ${
-                          c.bleedYield === 15 ? 'badge-fire text-glow-fire' : 
+                          c.bleedYield === 25 || c.bleedYield === 15 ? 'badge-fire text-glow-fire' : 
                           c.bleedYield === 10 ? 'badge-earth text-glow-earth' : 
                           c.bleedYield === 6 ? 'badge-water text-glow-water' : 
                           c.bleedYield === 3 ? 'badge-lightning text-glow-lightning' : 'badge-secondary'
@@ -2740,6 +2775,7 @@ function App() {
                   <div style={{ fontSize: '0.7rem', color: 'var(--color-lightning)', marginTop: '0.2rem', paddingLeft: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.25rem', alignItems: 'center' }}>
                     <span>⚡ Next Yield (+{c.nextLowerYield}):</span>
                     <strong style={{ color: 'var(--text-primary)' }}>-{c.repNeededToChange.toLocaleString()} rep</strong>
+                    <span style={{ color: 'var(--text-muted)' }}>(at {c.targetRepAtThreshold.toLocaleString()})</span>
                     {c.timeToChange !== null && (
                       <span style={{ color: 'var(--text-muted)' }}>(~{c.timeToChange.toFixed(1)}h)</span>
                     )}
@@ -3225,37 +3261,40 @@ function App() {
                           )}
                         </td>
                         <td style={{ textAlign: 'right' }}>
-                          {c.isBleeding ? (
-                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.2rem' }}>
-                              <span className="bleed-info-tooltip">
-                                <span 
-                                  className={`badge ${
-                                    c.bleedYield === 15 ? 'badge-fire text-glow-fire' : 
-                                    c.bleedYield === 10 ? 'badge-earth text-glow-earth' : 
-                                    c.bleedYield === 6 ? 'badge-water text-glow-water' : 
-                                    c.bleedYield === 3 ? 'badge-lightning text-glow-lightning' : 'badge-secondary'
-                                  }`} 
-                                  style={{ fontWeight: 'bold', fontSize: '0.85rem', cursor: 'help' }}
-                                >
-                                  +{c.bleedYield} rep
-                                </span>
-                                <RepRangeTooltip 
-                                  baseRep={current.reputation} 
-                                  targetRep={c.reputation}
-                                  activeYield={c.bleedYield}
-                                  title={`⚔️ Yield Brackets relative to Your Clan`}
-                                  subtitle={`Target: ${c.name} (#${c.rank})`}
-                                />
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.2rem' }}>
+                            <span className="bleed-info-tooltip">
+                              <span 
+                                className={`badge ${
+                                  c.bleedYield === 25 || c.bleedYield === 15 ? 'badge-fire text-glow-fire' : 
+                                  c.bleedYield === 10 ? 'badge-earth text-glow-earth' : 
+                                  c.bleedYield === 6 ? 'badge-water text-glow-water' : 
+                                  c.bleedYield === 3 ? 'badge-lightning text-glow-lightning' : 'badge-secondary'
+                                }`} 
+                                style={{ fontWeight: 'bold', fontSize: '0.85rem', cursor: 'help' }}
+                              >
+                                +{c.bleedYield} rep
                               </span>
+                              <RepRangeTooltip 
+                                baseRep={current.reputation} 
+                                targetRep={c.reputation}
+                                activeYield={c.bleedYield}
+                                title={`⚔️ Yield Brackets relative to Your Clan`}
+                                subtitle={`Target: ${c.name} (#${c.rank})`}
+                              />
+                            </span>
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.1rem', fontSize: '0.65rem' }}>
                               {c.repNeededToChange !== null && c.repNeededToChange > 0 && (
-                                <span style={{ fontSize: '0.65rem', color: 'var(--color-lightning)', whiteSpace: 'nowrap' }} title={`Next yield tier (+${c.nextLowerYield}) is reached when target loses ${c.repNeededToChange.toLocaleString()} reputation.`}>
-                                  -{c.repNeededToChange.toLocaleString()} rep {c.timeToChange !== null && `(~${c.timeToChange.toFixed(1)}h)`}
+                                <span style={{ color: 'var(--color-lightning)', whiteSpace: 'nowrap' }} title={`Next lower yield (+${c.nextLowerYield}) is reached when target drops below ${c.targetRepAtThreshold.toLocaleString()} rep.`}>
+                                  -{c.repNeededToChange.toLocaleString()} rep (at {c.targetRepAtThreshold.toLocaleString()})
+                                </span>
+                              )}
+                              {c.repNeededToGain !== null && c.repNeededToGain > 0 && (
+                                <span style={{ color: 'var(--color-wind)', whiteSpace: 'nowrap' }} title={`Next higher yield (+${c.nextHigherYield}) is reached when target rises above ${c.targetRepAtHigherThreshold.toLocaleString()} rep.`}>
+                                  +{c.repNeededToGain.toLocaleString()} rep (at {c.targetRepAtHigherThreshold.toLocaleString()})
                                 </span>
                               )}
                             </div>
-                          ) : (
-                            <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>None (0 rep)</span>
-                          )}
+                          </div>
                         </td>
                       </tr>
                     );
