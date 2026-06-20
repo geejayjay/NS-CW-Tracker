@@ -916,11 +916,18 @@ function App() {
       // Note: bleedingLocks update happens in bleedAnalysis after we confirm
       // the clan is actually in an attacker's range (stagnant alone != bleeding)
 
-      // Count inactive members in this clan
-      const inactiveCount = clan.member_list.filter(m => {
-        return m.reputation === 0 || (m.level >= 80 && m.reputation < 200);
-      }).length;
-      const inactivePercent = clan.members > 0 ? (inactiveCount / clan.members) * 100 : 0;
+      // Count active members in this clan (members gaining rep during the reset)
+      let activeRosterCount = 0;
+      if (clan.member_list && baselineClan && baselineClan.member_list) {
+        clan.member_list.forEach(m => {
+          const baselineMember = baselineClan.member_list.find(bm => bm.id === m.id);
+          const memberGain = baselineMember ? (m.reputation - baselineMember.reputation) : m.reputation;
+          if (memberGain > 0) {
+            activeRosterCount++;
+          }
+        });
+      }
+      const activeRosterPercent = clan.members > 0 ? (activeRosterCount / clan.members) * 100 : 0;
 
       // Reputation percentage difference relative to my clan
       const diffPercent = ((clan.reputation - myClanRep) / myClanRep) * 100;
@@ -952,8 +959,8 @@ function App() {
         isWeightedStagnant,
         normalizedActivity,
         avgWeightedVelocity,
-        inactiveCount,
-        inactivePercent,
+        activeRosterCount,
+        activeRosterPercent,
         isBleeding: false, // computed below
         diffPercent,
         bleedYield
@@ -3133,13 +3140,11 @@ function App() {
                   <tr>
                     <th>Rank</th>
                     <th>Clan Name</th>
-                    <th className="hide-mobile">Master</th>
                     <th>Total Reputation</th>
                     <th>Gain (Prev Reset)</th>
                     <th>Gain (Current)</th>
-                    <th className="hide-mobile">Inactive roster</th>
-                    <th>State</th>
-                    <th className="hide-mobile">Bleed Score</th>
+                    <th className="hide-mobile">Active Roster</th>
+                    <th>State & Bleed Score</th>
                     <th style={{ textAlign: 'right' }}>Bleed Yield</th>
                   </tr>
                 </thead>
@@ -3177,10 +3182,11 @@ function App() {
                                 ID: {c.id} {copiedId === c.id ? '✓' : '📋'}
                               </span>
                             </div>
-                            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Size: {c.members}/40</span>
+                            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                              Master: <strong style={{ color: 'var(--color-earth)' }}>{c.master}</strong> | Size: {c.members}/40
+                            </div>
                           </div>
                         </td>
-                        <td className="hide-mobile">{c.master}</td>
                         <td className="text-number">{c.reputation.toLocaleString()}</td>
                         <td className="text-number">
                           {c.prevResetGain > 0 ? (
@@ -3197,53 +3203,68 @@ function App() {
                           )}
                         </td>
                         <td className="hide-mobile">
-                          <span style={{ color: c.inactivePercent > 25 ? 'var(--color-fire)' : 'var(--text-primary)' }}>
-                            {c.inactiveCount} ({c.inactivePercent.toFixed(2)}%)
+                          <span style={{ color: c.activeRosterPercent > 50 ? 'var(--color-wind)' : c.activeRosterPercent > 20 ? 'var(--text-primary)' : 'var(--color-fire)', fontWeight: '500' }}>
+                            {c.activeRosterCount} ({c.activeRosterPercent.toFixed(1)}%)
                           </span>
                         </td>
                         <td>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                            {/* Bleeding Indicator */}
-                            {c.isBleeding && (
-                              <span style={{ color: 'var(--color-fire)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
-                                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-fire)', display: 'inline-block' }} className="bleeding-pulse"></span>
-                                <span>Possible Bleed</span>
-                                <span className="bleed-info-tooltip">
-                                  <IconInfo style={{ color: 'var(--text-muted)', cursor: 'help' }} />
-                                  <div className="tooltip-card">
-                                    <div style={{ fontWeight: 'bold', marginBottom: '0.4rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.2rem', color: 'var(--color-fire)', fontFamily: 'var(--font-gaming)' }}>
-                                      🔴 Bleed Analysis
-                                    </div>
-                                    <div style={{ marginBottom: '0.3rem' }}>
-                                      <strong>Score:</strong> {c.bleedScore.toFixed(2)}/100
-                                    </div>
-                                    <div style={{ marginBottom: '0.3rem' }}>
-                                      <strong>Reason:</strong> {c.bleedReason}
-                                    </div>
-                                    {c.bleedAttackers && c.bleedAttackers.length > 0 && (
-                                      <div>
-                                        <strong>Likely Attackers:</strong>
-                                        <div style={{ color: 'var(--text-secondary)', marginTop: '0.15rem', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
-                                          {c.bleedAttackers.map(a => {
-                                            const rangeText = a.inferredRange 
-                                              ? `[Farming +${a.inferredYield} target in range ${Math.round(a.inferredRange.minRep).toLocaleString()} - ${a.inferredRange.maxRep === Infinity ? '∞' : Math.round(a.inferredRange.maxRep).toLocaleString()}]`
-                                              : '';
-                                            return (
-                                              <div key={a.id} style={{ fontSize: '0.7rem' }}>
-                                                • {a.name} (#{a.rank}) {rangeText}
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
+                            {/* Bleeding Indicator with Score */}
+                            {c.isBleeding ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                                <span style={{ color: 'var(--color-fire)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-fire)', display: 'inline-block' }} className="bleeding-pulse"></span>
+                                  <span>Possible Bleed</span>
+                                  <span className="bleed-info-tooltip">
+                                    <IconInfo style={{ color: 'var(--text-muted)', cursor: 'help' }} />
+                                    <div className="tooltip-card">
+                                      <div style={{ fontWeight: 'bold', marginBottom: '0.4rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.2rem', color: 'var(--color-fire)', fontFamily: 'var(--font-gaming)' }}>
+                                        🔴 Bleed Analysis
                                       </div>
-                                    )}
-                                  </div>
+                                      <div style={{ marginBottom: '0.3rem' }}>
+                                        <strong>Score:</strong> {c.bleedScore.toFixed(2)}/100
+                                      </div>
+                                      <div style={{ marginBottom: '0.3rem' }}>
+                                        <strong>Reason:</strong> {c.bleedReason}
+                                      </div>
+                                      {c.bleedAttackers && c.bleedAttackers.length > 0 && (
+                                        <div>
+                                          <strong>Likely Attackers:</strong>
+                                          <div style={{ color: 'var(--text-secondary)', marginTop: '0.15rem', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                                            {c.bleedAttackers.map(a => {
+                                              const rangeText = a.inferredRange 
+                                                ? `[Farming +${a.inferredYield} target in range ${Math.round(a.inferredRange.minRep).toLocaleString()} - ${a.inferredRange.maxRep === Infinity ? '∞' : Math.round(a.inferredRange.maxRep).toLocaleString()}]`
+                                                : '';
+                                              return (
+                                                <div key={a.id} style={{ fontSize: '0.7rem' }}>
+                                                  • {a.name} (#{a.rank}) {rangeText}
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </span>
                                 </span>
-                              </span>
-                            )}
-
-                            {/* Active/Farming Indicator */}
-                            {c.isActivelyGaining ? (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                  <span className="text-number" style={{ 
+                                    fontWeight: 'bold', 
+                                    fontSize: '0.75rem',
+                                    color: c.bleedScore >= 70 ? 'var(--color-fire)' : c.bleedScore >= 40 ? 'var(--color-earth)' : 'var(--text-secondary)'
+                                  }}>
+                                    Score: {c.bleedScore.toFixed(0)}
+                                  </span>
+                                  <div className="progress-bar-bg" style={{ width: '50px', height: '4px', margin: 0 }}>
+                                    <div className="progress-bar-fill" style={{ 
+                                      width: `${c.bleedScore}%`, 
+                                      background: c.bleedScore >= 70 ? 'var(--color-fire)' : c.bleedScore >= 40 ? 'var(--color-earth)' : 'var(--text-muted)'
+                                    }}></div>
+                                  </div>
+                                </div>
+                              </div>
+                            ) : c.isActivelyGaining ? (
+                              /* Active/Farming Indicator */
                               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
                                 <span style={{ color: 'var(--color-wind)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
                                   <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-wind)', display: 'inline-block' }}></span>
@@ -3271,38 +3292,13 @@ function App() {
                                 )}
                               </div>
                             ) : (
-                              // Show stable only if not bleeding and not active
-                              !c.isBleeding && (
-                                <span style={{ color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
-                                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--text-muted)', display: 'inline-block' }}></span>
-                                  Stable
-                                </span>
-                              )
+                              /* Stable Indicator */
+                              <span style={{ color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--text-muted)', display: 'inline-block' }}></span>
+                                Stable
+                              </span>
                             )}
                           </div>
-                        </td>
-                        <td className="hide-mobile">
-                          {c.isBleeding ? (
-                            <div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                <span className="text-number" style={{ 
-                                  fontWeight: 'bold', 
-                                  fontSize: '0.9rem',
-                                  color: c.bleedScore >= 70 ? 'var(--color-fire)' : c.bleedScore >= 40 ? 'var(--color-earth)' : 'var(--text-secondary)'
-                                }}>
-                                  {c.bleedScore.toFixed(2)}
-                                </span>
-                                <div className="progress-bar-bg" style={{ flexGrow: 1, height: '6px' }}>
-                                  <div className="progress-bar-fill" style={{ 
-                                    width: `${c.bleedScore}%`, 
-                                    background: c.bleedScore >= 70 ? 'var(--color-fire)' : c.bleedScore >= 40 ? 'var(--color-earth)' : 'var(--text-muted)'
-                                  }}></div>
-                                </div>
-                              </div>
-                            </div>
-                          ) : (
-                            <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>—</span>
-                          )}
                         </td>
                         <td style={{ textAlign: 'right' }}>
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.2rem' }}>
@@ -3377,7 +3373,7 @@ function App() {
                   })}
                   {filteredLeaderboard.length === 0 && (
                     <tr>
-                      <td colSpan="10" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                      <td colSpan="8" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
                         No clans matched your leaderboard filters.
                       </td>
                     </tr>
@@ -3391,34 +3387,11 @@ function App() {
         {/* TAB 3: ROSTER ANALYSIS */}
         {activeTab === 'roster' && (
           <section className="glass-card animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-            {/* History Selector Toggle */}
-            <div style={{ display: 'flex', gap: '0.5rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
-              <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-gaming)', marginRight: '0.5rem' }}>VIEWING MODE:</span>
-              <button 
-                className={!viewHistoryMode ? 'btn-primary' : 'btn-secondary'} 
-                style={{ padding: '0.45rem 1.25rem', fontSize: '0.85rem', fontWeight: 'bold', minHeight: '36px' }}
-                onClick={() => setViewHistoryMode(false)}
-              >
-                ⚡ CURRENT RESET
-              </button>
-              <button 
-                className={viewHistoryMode ? 'btn-primary' : 'btn-secondary'} 
-                style={{ 
-                  padding: '0.45rem 1.25rem', 
-                  fontSize: '0.85rem', 
-                  fontWeight: 'bold', 
-                  minHeight: '36px',
-                  borderColor: viewHistoryMode ? 'var(--color-earth)' : 'transparent',
-                  boxShadow: viewHistoryMode ? 'var(--glow-earth)' : 'none'
-                }}
-                onClick={() => setViewHistoryMode(true)}
-                disabled={!lastResetRankings}
-              >
-                ⏳ LAST RESET HISTORY {!lastResetRankings && '(NO DATA)'}
-              </button>
-              {viewHistoryMode && lastResetRankings && (
-                <span className="badge badge-earth animate-pulse" style={{ marginLeft: 'auto', fontSize: '0.8rem' }}>
-                  ⏳ Showing data from previous reset ({lastResetRankings.generated_at})
+            <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.85rem', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <h3 style={{ fontSize: '1.1rem', color: 'var(--text-primary)', margin: 0, fontFamily: 'var(--font-gaming)' }}>👥 ROSTER ANALYSIS</h3>
+              {lastResetRankings && (
+                <span className="badge badge-secondary" style={{ fontSize: '0.75rem', fontFamily: 'var(--font-gaming)' }}>
+                  PREV RESET: {lastResetRankings.generated_at}
                 </span>
               )}
             </div>
@@ -3480,8 +3453,11 @@ function App() {
                     <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('reputation'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
                       Total Reputation {sortBy === 'reputation' ? (sortOrder === 'asc' ? '▲' : '▼') : ''}
                     </th>
+                    <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('prevReputationGain'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                      Gain (Prev Reset) {sortBy === 'prevReputationGain' ? (sortOrder === 'asc' ? '▲' : '▼') : ''}
+                    </th>
                     <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('reputationGain'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
-                      Gain (Reset) {sortBy === 'reputationGain' ? (sortOrder === 'asc' ? '▲' : '▼') : ''}
+                      Gain (Current) {sortBy === 'reputationGain' ? (sortOrder === 'asc' ? '▲' : '▼') : ''}
                     </th>
                     <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('status'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
                       State Info {sortBy === 'status' ? (sortOrder === 'asc' ? '▲' : '▼') : ''}
@@ -3500,6 +3476,13 @@ function App() {
                       </td>
                       <td className="hide-mobile">Lvl {m.level}</td>
                       <td className="text-number">{m.reputation.toLocaleString()}</td>
+                      <td className="text-number">
+                        {m.prevReputationGain > 0 ? (
+                          <span style={{ color: 'var(--color-earth)', fontWeight: 'bold' }}>+{m.prevReputationGain.toLocaleString()}</span>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }}>0</span>
+                        )}
+                      </td>
                       <td className="text-number">
                         {m.reputationGain > 0 ? (
                           <span style={{ color: 'var(--color-wind)', fontWeight: 'bold' }}>+{m.reputationGain.toLocaleString()}</span>
@@ -3520,7 +3503,7 @@ function App() {
                   ))}
                   {filteredMembers.length === 0 && (
                     <tr>
-                      <td colSpan="5" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                      <td colSpan="6" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
                         No members matched the search or filter query.
                       </td>
                     </tr>
@@ -3783,9 +3766,9 @@ function App() {
                   </strong>
                 </div>
                 <div className="glass-card" style={{ padding: '0.75rem 1rem', background: 'var(--bg-tertiary)' }}>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>INACTIVE MEMBERS</div>
-                  <strong style={{ fontSize: '1rem', color: liveInspectingClan.inactivePercent > 25 ? 'var(--color-fire)' : 'var(--text-primary)' }}>
-                    {liveInspectingClan.inactiveCount || 0} ({(liveInspectingClan.inactivePercent || 0).toFixed(2)}%)
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>ACTIVE ROSTER (RESET)</div>
+                  <strong style={{ fontSize: '1rem', color: liveInspectingClan.activeRosterPercent > 50 ? 'var(--color-wind)' : 'var(--text-primary)' }}>
+                    {liveInspectingClan.activeRosterCount || 0} ({(liveInspectingClan.activeRosterPercent || 0).toFixed(1)}%)
                   </strong>
                 </div>
               </div>
