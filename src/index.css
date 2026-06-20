@@ -566,3 +566,30 @@ h1, h2, h3, h4, .font-gaming {
   }
 }
 
+/* Copyable Clan ID badge styling */
+.badge-id {
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  color: var(--color-water);
+  font-family: var(--font-gaming);
+  font-size: 0.7rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-weight: 600;
+  user-select: none;
+  line-height: 1;
+}
+
+.badge-id:hover {
+  background: rgba(6, 182, 212, 0.2);
+  border-color: var(--color-water);
+  box-shadow: 0 0 10px rgba(6, 182, 212, 0.3);
+  color: var(--text-primary);
+}
+
+

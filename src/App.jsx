@@ -257,6 +257,17 @@ function App() {
   );
   const [viewHistoryMode, setViewHistoryMode] = useState(false);
   const [sortOrder, setSortOrder] = useState('desc');
+  const [copiedId, setCopiedId] = useState(null);
+
+  const handleCopyId = (id) => {
+    try {
+      navigator.clipboard.writeText(id.toString());
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 1000);
+    } catch (err) {
+      console.error('Failed to copy ID to clipboard', err);
+    }
+  };
 
   // Leaderboard Filtering & Search States
   const [lbSearch, setLbSearch] = useState('');
@@ -679,18 +690,12 @@ function App() {
 
   // Decide which data source to use for calculations: current reset or last reset history
   const activeSnapshots = useMemo(() => {
-    if (viewHistoryMode && lastResetSnapshots && lastResetSnapshots.length > 0) {
-      return lastResetSnapshots;
-    }
     return snapshots;
-  }, [viewHistoryMode, snapshots, lastResetSnapshots]);
+  }, [snapshots]);
 
   const activeRankings = useMemo(() => {
-    if (viewHistoryMode && lastResetRankings) {
-      return lastResetRankings;
-    }
     return rankings;
-  }, [viewHistoryMode, rankings, lastResetRankings]);
+  }, [rankings]);
 
   // Calculate stats for target clan
   const targetClanData = useMemo(() => {
@@ -705,9 +710,20 @@ function App() {
     const prevSnapshot = activeSnapshots[activeSnapshots.length - 2];
     const prevClan = prevSnapshot ? prevSnapshot.clans.find(c => c.id === currentClan.id) : null;
 
+    // Previous reset baseline for roster comparison
+    const prevBaselineSnapshot = lastResetSnapshots.length > 0 ? lastResetSnapshots[0] : null;
+    const prevFinalRankings = lastResetRankings;
+    const prevBaselineClan = prevBaselineSnapshot ? prevBaselineSnapshot.clans.find(c => c.id === targetClanId) : null;
+    const prevFinalClan = prevFinalRankings ? prevFinalRankings.clans.find(c => c.id === targetClanId) : null;
+
     const memberAnalysis = currentClan.member_list.map(member => {
       const baselineMember = (baselineClan && baselineClan.member_list) ? baselineClan.member_list.find(m => m.id === member.id) : null;
       const reputationGain = baselineMember ? (member.reputation - baselineMember.reputation) : 0;
+      
+      // Calculate previous reset gain for this member
+      const prevMemberFinal = prevFinalClan?.member_list?.find(m => m.id === member.id);
+      const prevMemberBaseline = prevBaselineClan?.member_list?.find(m => m.id === member.id);
+      const prevReputationGain = (prevMemberFinal && prevMemberBaseline) ? (prevMemberFinal.reputation - prevMemberBaseline.reputation) : 0;
       
       let status = 'active';
       if (reputationGain > 0) {
@@ -725,6 +741,7 @@ function App() {
       return {
         ...member,
         reputationGain,
+        prevReputationGain,
         status,
         prevReputation: baselineMember ? baselineMember.reputation : 0
       };
@@ -745,7 +762,7 @@ function App() {
     
     const sortedMembers = [...memberAnalysis].sort((a, b) => {
       let comparison = 0;
-      if (sortBy === 'reputation' || sortBy === 'reputationGain' || sortBy === 'level') {
+      if (sortBy === 'reputation' || sortBy === 'reputationGain' || sortBy === 'prevReputationGain' || sortBy === 'level') {
         comparison = a[sortBy] - b[sortBy];
       } else {
         comparison = a[sortBy].toString().localeCompare(b[sortBy].toString());
@@ -775,12 +792,21 @@ function App() {
     // Use previous snapshot for per-tick gain detection
     const prevSnapshot = activeSnapshots.length >= 2 ? activeSnapshots[activeSnapshots.length - 2] : null;
 
-    const activeGainingLocks = viewHistoryMode ? lastResetGainingLocks : gainingLocks;
+    const activeGainingLocks = gainingLocks;
+
+    // Previous reset baseline for comparisons
+    const prevBaselineSnapshot = lastResetSnapshots.length > 0 ? lastResetSnapshots[0] : null;
+    const prevFinalRankings = lastResetRankings;
 
     return activeRankings.clans.filter(clan => clan.rank <= rankLimit).map(clan => {
       // Cumulative gain since baseline (reset boundary)
       const baselineClan = baselineSnapshot ? baselineSnapshot.clans.find(c => c.id === clan.id) : null;
       const gain = baselineClan ? (clan.reputation - baselineClan.reputation) : 0;
+
+      // Previous reset cumulative gain
+      const prevFinalClan = prevFinalRankings ? prevFinalRankings.clans.find(c => c.id === clan.id) : null;
+      const prevBaselineClan = prevBaselineSnapshot ? prevBaselineSnapshot.clans.find(c => c.id === clan.id) : null;
+      const prevResetGain = (prevFinalClan && prevBaselineClan) ? (prevFinalClan.reputation - prevBaselineClan.reputation) : 0;
 
       // Per-tick gain (latest vs previous snapshot)
       const prevClan = prevSnapshot ? prevSnapshot.clans.find(c => c.id === clan.id) : null;
@@ -813,12 +839,12 @@ function App() {
 
       for (let i = activeSnapshots.length - 1; i >= 1; i--) {
         const curr = activeSnapshots[i].clans.find(c => c.id === clan.id);
-        const prev = activeSnapshots[i - 1].clans.find(c => c.id === clan.id);
-        if (!curr || !prev) continue;
+        const pClan = activeSnapshots[i - 1].clans.find(c => c.id === clan.id);
+        if (!curr || !pClan) continue;
 
         const distance = activeSnapshots.length - 1 - i; // 0 for most recent
         const weight = Math.pow(DECAY_BASE, distance);
-        const pairGain = curr.reputation - prev.reputation;
+        const pairGain = curr.reputation - pClan.reputation;
 
         totalPairs++;
         maxPossibleScore += weight;
@@ -863,12 +889,10 @@ function App() {
       }
 
       // Update lock (only if not in history mode)
-      if (!viewHistoryMode) {
-        if (isActivelyGaining) {
-          gainingLocks.current.set(clan.id, true);
-        } else {
-          gainingLocks.current.delete(clan.id);
-        }
+      if (isActivelyGaining) {
+        gainingLocks.current.set(clan.id, true);
+      } else {
+        gainingLocks.current.delete(clan.id);
       }
 
       // ── Hysteresis for "weighted stagnant" (bleed candidate) ──
@@ -920,6 +944,7 @@ function App() {
       return {
         ...clan,
         gain,
+        prevResetGain,
         tickGain,
         consecutiveGainStreak,
         consecutiveStagnantTicks,
@@ -934,7 +959,7 @@ function App() {
         bleedYield
       };
     });
-  }, [activeRankings, activeSnapshots, targetClanData, rankLimit, viewHistoryMode]);
+  }, [activeRankings, activeSnapshots, targetClanData, rankLimit, lastResetSnapshots, lastResetRankings]);
 
   // Clans actively gaining rep (farming)
   const activelyGainingClans = useMemo(() => {
@@ -1495,7 +1520,7 @@ function App() {
     });
 
     // ── Build final results with dynamic lock cooldowns ──
-    const activeBleedingLocks = viewHistoryMode ? lastResetBleedingLocks : bleedingLocks;
+    const activeBleedingLocks = bleedingLocks;
     const newBleedingLocks = new Map();
 
     const results = leaderboardAnalysis.map(clan => {
@@ -1603,9 +1628,7 @@ function App() {
             bleedReason: lastReason,
             consecutiveBleedingTicks,
           };
-          if (!viewHistoryMode) {
-            newBleedingLocks.set(clan.id, retainedLockObj);
-          }
+          newBleedingLocks.set(clan.id, retainedLockObj);
 
           if (gainingClanIds.has(clan.id)) {
             const attackerData = attackerTargetMap.get(clan.id);
@@ -1667,13 +1690,11 @@ function App() {
       };
     });
 
-    // Update bleedingLocks ref with the new set (only if not in history mode)
-    if (!viewHistoryMode) {
-      bleedingLocks.current = newBleedingLocks;
-    }
+    // Update bleedingLocks ref with the new set
+    bleedingLocks.current = newBleedingLocks;
 
     return results;
-  }, [leaderboardAnalysis, activelyGainingClans, targetClanData, activeSnapshots, viewHistoryMode]);
+  }, [leaderboardAnalysis, activelyGainingClans, targetClanData, activeSnapshots]);
 
   // Polling, Countdown & Clock Boundary Reset Effect
   // Uses a Web Worker so timers keep running accurately even when the tab is
@@ -2696,13 +2717,24 @@ function App() {
             {bleedingTargets.slice(0, 5).map(c => (
               <div key={c.id} style={{ fontSize: '0.9rem' }}>
                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                     <span 
                       style={{ cursor: 'pointer', textDecoration: 'underline', fontWeight: '500' }}
                       onClick={() => setInspectingClan(c)}
                       title="Click to inspect this clan"
                     >
                       #{c.rank} {c.name}
+                    </span>
+                    <span 
+                      className="badge-id" 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleCopyId(c.id);
+                      }}
+                      title="Click to copy Clan ID"
+                      style={{ fontSize: '0.65rem', padding: '0.1rem 0.3rem' }}
+                    >
+                      ID: {c.id} {copiedId === c.id ? '✓' : '📋'}
                     </span>
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                       ({c.diffPercent >= 0 ? '+' : ''}{c.diffPercent.toFixed(2)}%)
@@ -2772,12 +2804,26 @@ function App() {
                   </div>
                 </div>
                 {c.repNeededToChange !== null && c.repNeededToChange > 0 && (
-                  <div style={{ fontSize: '0.7rem', color: 'var(--color-lightning)', marginTop: '0.2rem', paddingLeft: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.25rem', alignItems: 'center' }}>
-                    <span>⚡ Next Yield (+{c.nextLowerYield}):</span>
-                    <strong style={{ color: 'var(--text-primary)' }}>-{c.repNeededToChange.toLocaleString()} rep</strong>
+                  <div 
+                    style={{ 
+                      fontSize: '0.68rem', 
+                      marginTop: '0.3rem', 
+                      display: 'inline-flex', 
+                      alignItems: 'center', 
+                      gap: '0.35rem',
+                      padding: '0.2rem 0.5rem',
+                      borderRadius: '4px',
+                      background: 'rgba(239, 68, 68, 0.04)',
+                      border: '1px solid rgba(239, 68, 68, 0.15)',
+                      color: 'var(--text-secondary)'
+                    }}
+                  >
+                    <span style={{ color: 'var(--color-fire)', fontWeight: 'bold' }}>▼</span>
+                    <span style={{ fontWeight: '500' }}>Next Yield (+{c.nextLowerYield}):</span>
+                    <strong style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-gaming)' }}>-{c.repNeededToChange.toLocaleString()} rep</strong>
                     <span style={{ color: 'var(--text-muted)' }}>(at {c.targetRepAtThreshold.toLocaleString()})</span>
                     {c.timeToChange !== null && (
-                      <span style={{ color: 'var(--text-muted)' }}>(~{c.timeToChange.toFixed(1)}h)</span>
+                      <span style={{ color: 'var(--text-muted)', borderLeft: '1px solid var(--border-color)', paddingLeft: '0.35rem' }}>~{c.timeToChange.toFixed(1)}h</span>
                     )}
                   </div>
                 )}
@@ -2990,34 +3036,11 @@ function App() {
         {/* TAB 2: LEADERBOARD & BLEED ANALYSIS */}
         {activeTab === 'leaderboard' && (
           <section className="glass-card animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-            {/* History Selector Toggle */}
-            <div style={{ display: 'flex', gap: '0.5rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
-              <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-gaming)', marginRight: '0.5rem' }}>VIEWING MODE:</span>
-              <button 
-                className={!viewHistoryMode ? 'btn-primary' : 'btn-secondary'} 
-                style={{ padding: '0.45rem 1.25rem', fontSize: '0.85rem', fontWeight: 'bold', minHeight: '36px' }}
-                onClick={() => setViewHistoryMode(false)}
-              >
-                ⚡ CURRENT RESET
-              </button>
-              <button 
-                className={viewHistoryMode ? 'btn-primary' : 'btn-secondary'} 
-                style={{ 
-                  padding: '0.45rem 1.25rem', 
-                  fontSize: '0.85rem', 
-                  fontWeight: 'bold', 
-                  minHeight: '36px',
-                  borderColor: viewHistoryMode ? 'var(--color-earth)' : 'transparent',
-                  boxShadow: viewHistoryMode ? 'var(--glow-earth)' : 'none'
-                }}
-                onClick={() => setViewHistoryMode(true)}
-                disabled={!lastResetRankings}
-              >
-                ⏳ LAST RESET HISTORY {!lastResetRankings && '(NO DATA)'}
-              </button>
-              {viewHistoryMode && lastResetRankings && (
-                <span className="badge badge-earth animate-pulse" style={{ marginLeft: 'auto', fontSize: '0.8rem' }}>
-                  ⏳ Showing data from previous reset ({lastResetRankings.generated_at})
+            <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.85rem', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <h3 style={{ fontSize: '1.1rem', color: 'var(--text-primary)', margin: 0, fontFamily: 'var(--font-gaming)' }}>⚔️ LEADERBOARD & BLEED ANALYSIS</h3>
+              {lastResetRankings && (
+                <span className="badge badge-secondary" style={{ fontSize: '0.75rem', fontFamily: 'var(--font-gaming)' }}>
+                  PREV RESET: {lastResetRankings.generated_at}
                 </span>
               )}
             </div>
@@ -3112,7 +3135,8 @@ function App() {
                     <th>Clan Name</th>
                     <th className="hide-mobile">Master</th>
                     <th>Total Reputation</th>
-                    <th>Gain (Reset)</th>
+                    <th>Gain (Prev Reset)</th>
+                    <th>Gain (Current)</th>
                     <th className="hide-mobile">Inactive roster</th>
                     <th>State</th>
                     <th className="hide-mobile">Bleed Score</th>
@@ -3130,21 +3154,41 @@ function App() {
                           </span>
                         </td>
                         <td>
-                          <div style={{ display: 'flex', flexDirection: 'column' }}>
-                            <strong 
-                              style={{ color: 'var(--text-primary)', cursor: 'pointer', textDecoration: 'underline' }}
-                              onClick={() => {
-                                setInspectingClan(c);
-                              }}
-                              title="Click to inspect this clan in detail"
-                            >
-                              {c.name} {isMyClan && <span style={{ textDecoration: 'none' }} className="badge badge-water">YOUR CLAN</span>}
-                            </strong>
-                            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>ID: {c.id} | Size: {c.members}/40</span>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                              <strong 
+                                style={{ color: 'var(--text-primary)', cursor: 'pointer', textDecoration: 'underline' }}
+                                onClick={() => {
+                                  setInspectingClan(c);
+                                }}
+                                title="Click to inspect this clan in detail"
+                              >
+                                {c.name}
+                              </strong>
+                              {isMyClan && <span className="badge badge-water" style={{ fontSize: '0.65rem', padding: '0.1rem 0.3rem' }}>YOUR CLAN</span>}
+                              <span 
+                                className="badge-id" 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCopyId(c.id);
+                                }}
+                                title="Click to copy Clan ID"
+                              >
+                                ID: {c.id} {copiedId === c.id ? '✓' : '📋'}
+                              </span>
+                            </div>
+                            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Size: {c.members}/40</span>
                           </div>
                         </td>
                         <td className="hide-mobile">{c.master}</td>
                         <td className="text-number">{c.reputation.toLocaleString()}</td>
+                        <td className="text-number">
+                          {c.prevResetGain > 0 ? (
+                            <span style={{ color: 'var(--color-earth)', fontWeight: 'bold' }}>+{c.prevResetGain.toLocaleString()}</span>
+                          ) : (
+                            <span style={{ color: 'var(--text-muted)' }}>0</span>
+                          )}
+                        </td>
                         <td className="text-number">
                           {c.gain > 0 ? (
                             <span style={{ color: 'var(--color-wind)', fontWeight: 'bold' }}>+{c.gain.toLocaleString()}</span>
@@ -3282,15 +3326,47 @@ function App() {
                                 subtitle={`Target: ${c.name} (#${c.rank})`}
                               />
                             </span>
-                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.1rem', fontSize: '0.65rem' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.25rem', marginTop: '0.25rem' }}>
                               {c.repNeededToChange !== null && c.repNeededToChange > 0 && (
-                                <span style={{ color: 'var(--color-lightning)', whiteSpace: 'nowrap' }} title={`Next lower yield (+${c.nextLowerYield}) is reached when target drops below ${c.targetRepAtThreshold.toLocaleString()} rep.`}>
-                                  -{c.repNeededToChange.toLocaleString()} rep (at {c.targetRepAtThreshold.toLocaleString()})
+                                <span 
+                                  style={{ 
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.25rem',
+                                    padding: '0.15rem 0.35rem',
+                                    borderRadius: '4px',
+                                    background: 'rgba(239, 68, 68, 0.04)',
+                                    border: '1px solid rgba(239, 68, 68, 0.15)',
+                                    color: 'var(--text-secondary)',
+                                    fontSize: '0.65rem',
+                                    whiteSpace: 'nowrap'
+                                  }} 
+                                  title={`Next lower yield (+${c.nextLowerYield}) is reached when target drops below ${c.targetRepAtThreshold.toLocaleString()} rep.`}
+                                >
+                                  <span style={{ color: 'var(--color-fire)', fontWeight: 'bold' }}>▼</span>
+                                  <span>-{c.repNeededToChange.toLocaleString()} rep</span>
+                                  <span style={{ color: 'var(--text-muted)', fontSize: '0.6rem' }}>(to +{c.nextLowerYield})</span>
                                 </span>
                               )}
                               {c.repNeededToGain !== null && c.repNeededToGain > 0 && (
-                                <span style={{ color: 'var(--color-wind)', whiteSpace: 'nowrap' }} title={`Next higher yield (+${c.nextHigherYield}) is reached when target rises above ${c.targetRepAtHigherThreshold.toLocaleString()} rep.`}>
-                                  +{c.repNeededToGain.toLocaleString()} rep (at {c.targetRepAtHigherThreshold.toLocaleString()})
+                                <span 
+                                  style={{ 
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.25rem',
+                                    padding: '0.15rem 0.35rem',
+                                    borderRadius: '4px',
+                                    background: 'rgba(16, 185, 129, 0.04)',
+                                    border: '1px solid rgba(16, 185, 129, 0.15)',
+                                    color: 'var(--text-secondary)',
+                                    fontSize: '0.65rem',
+                                    whiteSpace: 'nowrap'
+                                  }} 
+                                  title={`Next higher yield (+${c.nextHigherYield}) is reached when target rises above ${c.targetRepAtHigherThreshold.toLocaleString()} rep.`}
+                                >
+                                  <span style={{ color: 'var(--color-wind)', fontWeight: 'bold' }}>▲</span>
+                                  <span>+{c.repNeededToGain.toLocaleString()} rep</span>
+                                  <span style={{ color: 'var(--text-muted)', fontSize: '0.6rem' }}>(to +{c.nextHigherYield})</span>
                                 </span>
                               )}
                             </div>
@@ -3301,7 +3377,7 @@ function App() {
                   })}
                   {filteredLeaderboard.length === 0 && (
                     <tr>
-                      <td colSpan="9" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                      <td colSpan="10" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
                         No clans matched your leaderboard filters.
                       </td>
                     </tr>
@@ -3666,9 +3742,19 @@ function App() {
         <div className="modal-backdrop" onClick={() => setInspectingClan(null)}>
           <div className="modal-container" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <h3 className="text-glow-water" style={{ margin: 0, fontSize: '1.25rem' }}>
-                RANK #{liveInspectingClan.rank}: {liveInspectingClan.name}
-              </h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <h3 className="text-glow-water" style={{ margin: 0, fontSize: '1.25rem' }}>
+                  RANK #{liveInspectingClan.rank}: {liveInspectingClan.name}
+                </h3>
+                <span 
+                  className="badge-id" 
+                  onClick={() => handleCopyId(liveInspectingClan.id)}
+                  title="Click to copy Clan ID"
+                  style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}
+                >
+                  ID: {liveInspectingClan.id} {copiedId === liveInspectingClan.id ? '✓' : '📋'}
+                </span>
+              </div>
               <button 
                 className="btn-secondary" 
                 style={{ padding: '0.25rem 0.5rem', minWidth: '32px' }}
