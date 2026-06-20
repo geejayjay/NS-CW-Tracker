@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import sampleResponse from '../sample-response.json';
-import { YIELD_BRACKETS, ANALYSIS_CONFIG } from './constants';
+import { YIELD_BRACKETS, ANALYSIS_CONFIG, DEFAULT_YIELD_BRACKET } from './constants';
 import './App.css';
 
 // SVG Icons for clean UI without installing extra packages
@@ -517,6 +517,36 @@ function App() {
     latestInResetGracePeriod.current = inResetGracePeriod;
   }, [inResetGracePeriod]);
 
+  const latestIsAutoPolling = React.useRef(isAutoPolling);
+  useEffect(() => {
+    latestIsAutoPolling.current = isAutoPolling;
+  }, [isAutoPolling]);
+
+  const latestPollingInterval = React.useRef(pollingInterval);
+  useEffect(() => {
+    latestPollingInterval.current = pollingInterval;
+  }, [pollingInterval]);
+
+  const latestCwEndDay = React.useRef(cwEndDay);
+  useEffect(() => {
+    latestCwEndDay.current = cwEndDay;
+  }, [cwEndDay]);
+
+  const latestCwTimezone = React.useRef(cwTimezone);
+  useEffect(() => {
+    latestCwTimezone.current = cwTimezone;
+  }, [cwTimezone]);
+
+  const get30MinBoundaryStart = (timestamp) => {
+    const date = new Date(timestamp);
+    date.setSeconds(0, 0);
+    const m = date.getMinutes();
+    date.setMinutes(m < 30 ? 0 : 30);
+    return date.getTime();
+  };
+
+  const lastResetBoundaryTimeRef = React.useRef(get30MinBoundaryStart(Date.now()));
+
   const latestActualReset = React.useRef(null);
   const endGracePeriodAndReset = async () => {
     setInResetGracePeriod(false);
@@ -529,6 +559,11 @@ function App() {
     setTimeToNextPoll(pollingInterval);
   };
   latestActualReset.current = endGracePeriodAndReset;
+
+  const latestTriggerAutoPoll = React.useRef(triggerAutoPoll);
+  useEffect(() => {
+    latestTriggerAutoPoll.current = triggerAutoPoll;
+  }, [triggerAutoPoll]);
 
 
   const triggerAutoPoll = () => {
@@ -865,9 +900,11 @@ function App() {
       // Reputation percentage difference relative to my clan
       const diffPercent = ((clan.reputation - myClanRep) / myClanRep) * 100;
 
-      // Bleed Yield (+15, +10, +6, +3, +1) based on user's exact thresholds
+      // Bleed Yield (+25, +15, +10, +6, +3, +1) based on user's exact thresholds
       let bleedYield = 1;
-      if (diffPercent > 25) {
+      if (diffPercent > 50) {
+        bleedYield = 25;
+      } else if (diffPercent > 25) {
         bleedYield = 15;
       } else if (diffPercent > 10) {
         bleedYield = 10;
@@ -923,7 +960,10 @@ function App() {
     const computeThresholdFields = (clan) => {
       let nextLowerThreshold = null;
       let nextLowerYield = null;
-      if (clan.diffPercent > 25) {
+      if (clan.diffPercent > 50) {
+        nextLowerThreshold = 50;
+        nextLowerYield = 15;
+      } else if (clan.diffPercent > 25) {
         nextLowerThreshold = 25;
         nextLowerYield = 10;
       } else if (clan.diffPercent > 10) {
@@ -972,7 +1012,7 @@ function App() {
       const activeAttackerBrackets = viewHistoryMode ? lastResetAttackerBrackets : attackerBrackets;
 
       if (activeSnapshots.length < 2) {
-        return YIELD_BRACKETS[2]; // fallback to default +6
+        return DEFAULT_YIELD_BRACKET; // fallback to default +6
       }
 
       const latestSnapshot = activeSnapshots[activeSnapshots.length - 1];
@@ -997,7 +1037,7 @@ function App() {
         });
 
         if (memberGains.length > 0) {
-          const yields = [15, 10, 6, 3, 1];
+          const yields = [25, 15, 10, 6, 3, 1];
           let bestYield = null;
 
           for (const y of yields) {
@@ -1020,7 +1060,7 @@ function App() {
           }
 
           if (bestYield !== null) {
-            const inferredBracket = YIELD_BRACKETS.find(b => b.yield === bestYield) || YIELD_BRACKETS[2];
+            const inferredBracket = YIELD_BRACKETS.find(b => b.yield === bestYield) || DEFAULT_YIELD_BRACKET;
             if (!viewHistoryMode) {
               activeAttackerBrackets.current.set(attacker.id, inferredBracket);
             }
@@ -1035,7 +1075,7 @@ function App() {
         const estimatedActiveMembers = Math.max(5, Math.min(30, attacker.members * ANALYSIS_CONFIG.FALLBACK_ACTIVE_MEMBER_RATIO));
         const avgMemberGain = totalClanGain / estimatedActiveMembers;
 
-        let bestBracket = YIELD_BRACKETS[2];
+        let bestBracket = DEFAULT_YIELD_BRACKET;
         let bestFit = Infinity;
         YIELD_BRACKETS.forEach(bracket => {
           if (bracket.yield === 0) return;
@@ -1060,7 +1100,7 @@ function App() {
         return activeAttackerBrackets.current.get(attacker.id);
       }
 
-      return YIELD_BRACKETS[2]; // Default fallback
+      return DEFAULT_YIELD_BRACKET; // Default fallback
     };
 
     // Helper: given an attacker's rep and a yield bracket, compute the target clan rep range
@@ -1605,11 +1645,11 @@ function App() {
   // backgrounded (alt-tabbed). Browsers throttle main-thread setInterval in
   // inactive tabs, but Worker timers are exempt from this throttling.
   useEffect(() => {
-    if (!rankings) return;
-
     const worker = new Worker(new URL('./timerWorker.js', import.meta.url), { type: 'module' });
 
     worker.onmessage = () => {
+      if (!latestRankingsRef.current) return;
+
       const now = new Date();
       const m = now.getMinutes();
       const s = now.getSeconds();
@@ -1624,10 +1664,11 @@ function App() {
       setIsNearReset(diffSeconds <= 180); // <= 3 minutes left
 
       // Check boundary transition
-      const currentBoundaryKey = `${now.getHours()}:${m < 30 ? '00' : '30'}`;
-      if (lastResetBoundary && lastResetBoundary !== currentBoundaryKey) {
+      const currentBoundaryStart = get30MinBoundaryStart(now.getTime());
+      if (lastResetBoundaryTimeRef.current && lastResetBoundaryTimeRef.current !== currentBoundaryStart) {
         // Clock crossed the boundary! Set last boundary key.
-        setLastResetBoundary(currentBoundaryKey);
+        lastResetBoundaryTimeRef.current = currentBoundaryStart;
+        setLastResetBoundary(`${now.getHours()}:${m < 30 ? '00' : '30'}`);
         
         // Start 20s grace period
         setInResetGracePeriod(true);
@@ -1656,7 +1697,7 @@ function App() {
       let cwCountdownText = 'ENDED';
       try {
         let offsetMinutes = 0;
-        const match = cwTimezone.match(/^([+-])(\d{2}):(\d{2})$/);
+        const match = latestCwTimezone.current.match(/^([+-])(\d{2}):(\d{2})$/);
         if (match) {
           const sign = match[1] === '+' ? 1 : -1;
           const hours = parseInt(match[2], 10);
@@ -1665,7 +1706,7 @@ function App() {
         }
 
         const constructTargetDate = (year, month) => {
-          const utcMidnight = Date.UTC(year, month, cwEndDay, 0, 0, 0);
+          const utcMidnight = Date.UTC(year, month, latestCwEndDay.current, 0, 0, 0);
           return new Date(utcMidnight - (offsetMinutes * 60 * 1000));
         };
 
@@ -1711,14 +1752,14 @@ function App() {
       });
 
       // Decrement Auto-Poll Countdown
-      if (isAutoPolling) {
+      if (latestIsAutoPolling.current) {
         setTimeToNextPoll(prev => {
           if (prev <= 1) {
             // Only trigger auto-poll if we are not in the grace period
             if (!latestInResetGracePeriod.current && !inGrace) {
-              triggerAutoPoll();
+              latestTriggerAutoPoll.current();
             }
-            return pollingInterval;
+            return latestPollingInterval.current;
           }
           return prev - 1;
         });
@@ -1731,7 +1772,52 @@ function App() {
       worker.postMessage('stop');
       worker.terminate();
     };
-  }, [isAutoPolling, rankings, pollingInterval, lastResetBoundary, cwEndDay, cwTimezone]);
+  }, []);
+
+  // Handle visibility change and focus events to check reset immediately on wake/focus
+  useEffect(() => {
+    const handleFocusOrVisibility = () => {
+      if (!latestRankingsRef.current) return;
+      const now = new Date();
+      const currentBoundaryStart = get30MinBoundaryStart(now.getTime());
+      
+      if (lastResetBoundaryTimeRef.current && lastResetBoundaryTimeRef.current !== currentBoundaryStart) {
+        // A boundary was crossed while inactive! Set last boundary key.
+        lastResetBoundaryTimeRef.current = currentBoundaryStart;
+        setLastResetBoundary(`${now.getHours()}:${now.getMinutes() < 30 ? '00' : '30'}`);
+        
+        // Start 20s grace period
+        setInResetGracePeriod(true);
+        setResetGraceCountdown(20);
+
+        // Save current state as history BEFORE we wipe it
+        const currentSnaps = latestSnapshotsRef.current;
+        const currentRanks = latestRankingsRef.current;
+        if (currentSnaps && currentSnaps.length > 0 && currentRanks) {
+          setLastResetSnapshots(currentSnaps);
+          setLastResetRankings(currentRanks);
+          localStorage.setItem('ns_cw_last_reset_snapshots', JSON.stringify(currentSnaps));
+          localStorage.setItem('ns_cw_last_reset_rankings', JSON.stringify(currentRanks));
+          
+          // Capture current locks and bracket cache for history
+          lastResetGainingLocks.current = new Map(gainingLocks.current);
+          lastResetBleedingLocks.current = new Map(bleedingLocks.current);
+          lastResetAttackerBrackets.current = new Map(attackerBrackets.current);
+          localStorage.setItem('ns_cw_last_reset_gaining_locks', JSON.stringify([...gainingLocks.current.keys()]));
+          localStorage.setItem('ns_cw_last_reset_bleeding_locks', JSON.stringify([...bleedingLocks.current.entries()]));
+          localStorage.setItem('ns_cw_last_reset_attacker_brackets', JSON.stringify([...attackerBrackets.current.entries()]));
+        }
+      }
+    };
+
+    window.addEventListener('focus', handleFocusOrVisibility);
+    document.addEventListener('visibilitychange', handleFocusOrVisibility);
+
+    return () => {
+      window.removeEventListener('focus', handleFocusOrVisibility);
+      document.removeEventListener('visibilitychange', handleFocusOrVisibility);
+    };
+  }, []);
 
   // Adaptive Polling rate trigger on rankings updates and bleed detection
   useEffect(() => {

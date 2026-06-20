@@ -17,12 +17,15 @@
  * The rest of the codebase reads this array dynamically.
  */
 export const YIELD_BRACKETS = [
-  { yield: 15, minPercent: 25,        maxPercent: Infinity, label: '+15 (>25% higher)' },
+  { yield: 25, minPercent: 50,        maxPercent: Infinity, label: '+25 (>50% higher)' },
+  { yield: 15, minPercent: 25,        maxPercent: 50,       label: '+15 (25-50% higher)' },
   { yield: 10, minPercent: 10,        maxPercent: 25,       label: '+10 (10-25% higher)' },
   { yield: 6,  minPercent: 0,         maxPercent: 10,       label: '+6 (0-10% higher)' },
   { yield: 3,  minPercent: -10,       maxPercent: 0,        label: '+3 (0-10% lower)' },
   { yield: 1,  minPercent: -Infinity, maxPercent: -10,      label: '+1 (>10% lower)' },
 ];
+
+export const DEFAULT_YIELD_BRACKET = YIELD_BRACKETS.find(b => b.yield === 6);
 
 /**
  * Analysis tuning constants — separated here so they can be easily adjusted.
